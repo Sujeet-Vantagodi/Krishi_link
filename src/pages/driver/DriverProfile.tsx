@@ -1,5 +1,6 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useAuthStore } from '../../stores/authStore';
+import { API_BASE_URL } from '../../lib/api/client';
 import { Button } from '../../components/ui/button';
 import {
   User,
@@ -40,6 +41,17 @@ export const DriverProfile: React.FC = () => {
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
 
+  useEffect(() => {
+    if (user) {
+      if (user.name) setDriverName(user.name);
+      if (user.phone) setPhone(user.phone);
+      if (user.profile) {
+        if (user.profile.licence_no) setLicenseNumber(user.profile.licence_no);
+        if (user.profile.on_duty !== undefined) setIsOnDuty(Boolean(user.profile.on_duty));
+      }
+    }
+  }, [user]);
+
   // Profile Picture State (Base64 or preset emoji)
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [avatarUrl, setAvatarUrl] = useState<string>(() => localStorage.getItem('driver_avatar') || '');
@@ -76,13 +88,36 @@ export const DriverProfile: React.FC = () => {
     localStorage.removeItem('driver_avatar');
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (user) {
       setUser({
         ...user,
         name: driverName,
         phone: phone,
       });
+
+      try {
+        const token = localStorage.getItem('krishilink_token');
+        if (token) {
+          await fetch(`${API_BASE_URL}/me`, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              name: driverName,
+              phone: phone,
+              profile: {
+                licence_no: licenseNumber,
+                on_duty: isOnDuty,
+              },
+            }),
+          });
+        }
+      } catch (e) {
+        console.warn('Could not sync driver profile to backend:', e);
+      }
     }
     setEditModalOpen(false);
     setSavedSuccess(true);

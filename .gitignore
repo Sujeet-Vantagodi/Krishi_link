@@ -26,6 +26,9 @@ ENV/
 Thumbs.db
 desktop.ini
 
+# Logs
+*.log
+
 # SQLite journals
 *.db-journal
 *.db-wal

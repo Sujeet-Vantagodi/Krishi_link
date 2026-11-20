@@ -1,5 +1,6 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useAuthStore } from '../../stores/authStore';
+import { API_BASE_URL } from '../../lib/api/client';
 import { useFarmerThreshold } from '../../features/listings/hooks';
 import { Button } from '../../components/ui/button';
 import {
@@ -45,6 +46,21 @@ export const FarmerProfile: React.FC = () => {
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
 
+  useEffect(() => {
+    if (user) {
+      if (user.name) setFarmerName(user.name);
+      if (user.phone) setPhone(user.phone);
+      if (user.email) setEmail(user.email);
+      if (user.profile) {
+        if (user.profile.village) setVillage(user.profile.village);
+        if (user.profile.taluk) setTaluk(user.profile.taluk);
+        if (user.profile.district) setDistrict(user.profile.district);
+        if (user.profile.land_acres) setLandAcres(Number(user.profile.land_acres));
+        if (user.profile.upi_id) setUpiId(user.profile.upi_id);
+      }
+    }
+  }, [user]);
+
   // Profile Picture State (Base64 or preset emoji)
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [avatarUrl, setAvatarUrl] = useState<string>(() => localStorage.getItem('farmer_avatar') || '');
@@ -81,13 +97,39 @@ export const FarmerProfile: React.FC = () => {
     localStorage.removeItem('farmer_avatar');
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (user) {
       setUser({
         ...user,
         name: farmerName,
         phone: phone,
       });
+
+      try {
+        const token = localStorage.getItem('krishilink_token');
+        if (token) {
+          await fetch(`${API_BASE_URL}/me`, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              name: farmerName,
+              phone: phone,
+              profile: {
+                village,
+                taluk,
+                district,
+                land_acres: Number(landAcres),
+                upi_id: upiId,
+              },
+            }),
+          });
+        }
+      } catch (e) {
+        console.warn('Could not sync farmer profile to backend:', e);
+      }
     }
     setEditModalOpen(false);
     setSavedSuccess(true);

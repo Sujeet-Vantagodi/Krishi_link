@@ -1,5 +1,5 @@
 import { mockDb } from './mock/db';
-import { delay, ApiError } from './client';
+import { delay, ApiError, API_BASE_URL } from './client';
 import { mockRealtime } from '../realtime/mockRealtime';
 import {
   Crop,
@@ -321,7 +321,7 @@ export async function getFarmerPayments(farmerId = 'u_farmer_1'): Promise<Farmer
 
 export async function getDriverTrips(driverId = 'u_driver_1'): Promise<Trip[]> {
   try {
-    const res = await fetch(`http://localhost:8000/api/v1/driver/me/trips?driver_id=${driverId}`);
+    const res = await fetch(`${API_BASE_URL}/driver/me/trips?driver_id=${driverId}`);
     if (res.ok) {
       const data = await res.json();
       if (data.trips && data.trips.length > 0) {
@@ -597,7 +597,7 @@ export async function assignTrip(data: {
 
   // Sync assignment with live backend database
   try {
-    await fetch('http://localhost:8000/api/v1/admin/assign', {
+    await fetch(`${API_BASE_URL}/admin/assign`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
