@@ -7,9 +7,9 @@ from sqlalchemy.orm import Session
 from app.core.dependencies import require_roles
 from app.core.exceptions import ForbiddenException, NotFoundException
 from app.database import get_db
-from app.models.enums import TransferStatus, UserRole
+from app.models.enums import TransferStatus, TripStatus, TripType, UserRole
 from app.models.hub import HubStaff
-from app.models.trip import TransferRequest
+from app.models.trip import TransferRequest, Trip
 from app.models.user import User
 from app.schemas.transfer import TransferAssignment, TransferCreate, TransferDispatch, TransferOut, TransferReceive
 from app.services import transfer_service
@@ -48,6 +48,21 @@ def approve_transfer(transfer_id: uuid.UUID, db: Session = Depends(get_db), user
 def reject_transfer(transfer_id: uuid.UUID, db: Session = Depends(get_db),
                     _: User = Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN))):
     return transfer_service.reject_transfer(db, transfer_id)
+
+
+@router.get("/{transfer_id}/eligible-trips")
+def eligible_transfer_trips(transfer_id: uuid.UUID, db: Session = Depends(get_db),
+                            _: User = Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN))):
+    transfer = db.get(TransferRequest, transfer_id)
+    if not transfer:
+        raise NotFoundException("Transfer", transfer_id)
+    trips = db.query(Trip).filter(
+        Trip.type == TripType.TRANSFER, Trip.origin_hub_id == transfer.from_hub_id,
+        Trip.dest_hub_id == transfer.to_hub_id,
+        Trip.status.in_([TripStatus.ASSIGNED, TripStatus.ACKNOWLEDGED, TripStatus.STARTED]),
+    ).all()
+    return {"items": [{"id": trip.id, "driver": trip.driver.user.name,
+                       "vehicle": trip.vehicle.reg_no} for trip in trips if trip.driver and trip.vehicle and trip.vehicle.active]}
 
 
 @router.post("/{transfer_id}/assign", response_model=TransferOut)

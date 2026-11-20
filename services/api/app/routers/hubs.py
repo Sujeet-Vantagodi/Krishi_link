@@ -43,7 +43,14 @@ def api_hub_inbound_trips(id: uuid.UUID, current_user: User = Depends(require_ro
     if current_user.role == UserRole.HUB_STAFF and not db.get(HubStaff, (current_user.id, id)):
         raise ForbiddenException("Hub staff may only view an assigned hub")
     trips = db.query(Trip).filter(Trip.dest_hub_id == id, Trip.status.in_([TripStatus.ASSIGNED, TripStatus.ACKNOWLEDGED, TripStatus.STARTED, TripStatus.AT_HUB])).order_by(Trip.planned_start).all()
-    return {"items": [{"id": str(t.id), "type": t.type.value, "status": t.status.value, "driver_id": str(t.driver_id), "vehicle_id": str(t.vehicle_id), "stop_count": len(t.stops)} for t in trips], "total": len(trips)}
+    received = {(row.trip_id, row.crop_id) for row in db.query(HubReceipt).filter_by(hub_id=id).all()}
+    return {"items": [{
+        "id": str(t.id), "type": t.type.value, "status": t.status.value,
+        "driver_id": str(t.driver_id), "vehicle_id": str(t.vehicle_id), "stop_count": len(t.stops),
+        "crops": dict({str(receipt.crop_id): receipt.crop.name_en
+                       for stop in t.stops for receipt in stop.receipts
+                       if receipt.farmer_confirmed and (t.id, receipt.crop_id) not in received}),
+    } for t in trips], "total": len(trips)}
 
 
 @router.get("/{id}/stock-ledger")

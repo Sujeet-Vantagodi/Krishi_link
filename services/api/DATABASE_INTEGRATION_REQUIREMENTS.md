@@ -1,5 +1,12 @@
 # Database integration requirements
 
+## Final browser logistics continuation
+
+- No migration is added in this continuation. The browser logistics workflow uses the existing API-owned users, farmers, trips, stops, receipts, published prices and inventory ledger. Prior API migrations through `0005_order_address` remain prerequisites for existing deployments.
+- An eligible pickup requires a persisted farm location. Browser arrival supplies device coordinates for the geofence. Development seed coordinates and published prices are fixture data used only in the gated SQLite demo setup.
+- A hub receipt requires a completed, confirmed pickup for that crop. The measured grade breakdown drives accepted stock. A transfer receives only after its assigned trip reaches the destination. It debits the source by sent weight and credits the destination by received weight.
+- Production device telemetry and a verified payment/payout provider are external dependencies. Existing production schema rollout and historical reconciliation remain unverified.
+
 ## Core logistics continuation
 
 - API migration `0005_order_address` adds nullable `orders.delivery_address`. New buyer checkout stores the address snapshot. Legacy values remain null until a reliable source is available. Delivery geocoding and the verified payment-provider callback are still separate dependencies.

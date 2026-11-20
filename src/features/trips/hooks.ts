@@ -31,10 +31,11 @@ export function useDriverTrip(id: string) {
   });
 }
 
-export function useAdminTrips() {
+export function useAdminTrips(enabled = true) {
   return useQuery({
     queryKey: ['admin_trips'],
     queryFn: getAdminTrips,
+    enabled,
     refetchInterval: 5000,
   });
 }

@@ -1,5 +1,5 @@
 import uuid
-from datetime import date
+from datetime import date, datetime
 from typing import Optional, Dict, Any
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
@@ -82,14 +82,15 @@ def api_admin_overview(
 def api_dispatch_pool(
     date: Optional[date] = Query(None),
     current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    upcoming: bool = False,
 ):
-    target_date = date or date.today()
+    target_date = date or datetime.now().date()
 
     # Eligible listings ready for collection
     listings = db.query(FarmerListing).filter(
-        FarmerListing.listing_date == target_date,
-        FarmerListing.status == ListingStatus.ELIGIBLE
+        FarmerListing.listing_date >= target_date if upcoming else FarmerListing.listing_date == target_date,
+        FarmerListing.status.in_([ListingStatus.ELIGIBLE, ListingStatus.INELIGIBLE]) if upcoming else FarmerListing.status == ListingStatus.ELIGIBLE,
     ).all()
 
     pickup_stops = []
@@ -99,6 +100,11 @@ def api_dispatch_pool(
         loc = farmer.location if farmer else {}
         pickup_stops.append({
             "listing_id": l.id,
+            "id": l.id,
+            "listing_date": l.listing_date,
+            "created_at": l.created_at,
+            "status": l.status,
+            "min_kg_applied": float(l.min_kg_applied) if l.min_kg_applied is not None else None,
             "farmer_id": l.farmer_id,
             "nearest_hub_id": farmer.nearest_hub_id if farmer else None,
             "crop_id": l.crop_id,

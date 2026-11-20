@@ -1,3 +1,4 @@
+import { API_DEMO_MODE } from '../../lib/api/client';
 import React, { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
@@ -25,24 +26,28 @@ export const DriverStop: React.FC = () => {
   const submitDeliveryMutation = useSubmitDelivery();
   const skipStopMutation = useSkipStop();
 
-  const [buyerOtp, setBuyerOtp] = useState('4829');
+  const [buyerOtp, setBuyerOtp] = useState(API_DEMO_MODE ? '4829' : '');
+  const [eventId] = useState(() => crypto.randomUUID());
   const [deliverySuccess, setDeliverySuccess] = useState(false);
 
   if (isLoading || !trip) {
     return <div className="p-8 text-center text-slate-400">Loading stop details...</div>;
   }
 
-  const stop = trip.stops.find((s) => s.id === stopId) || trip.stops[0];
+  const stop = trip.stops.find((s) => s.id === stopId);
+  if (!stop) return <p role="alert">Stop unavailable</p>;
+  const assignedCrop = (stop as typeof stop & { crop_id?: string }).crop_id;
+  const receiptCrops = API_DEMO_MODE ? crops : crops.filter((crop) => crop.id === assignedCrop);
   const isPickup = stop.type === 'PICKUP';
   const isDelivery = stop.type === 'DELIVERY';
 
   const handlePickupSubmit = async (data: any) => {
-    await submitPickupMutation.mutateAsync({
+    if (submitPickupMutation.isPending) return;
+    submitPickupMutation.mutate({
       tripId: trip.id,
       stopId: stop.id,
-      data,
-    });
-    navigate(`/driver/trip/${trip.id}`);
+      data: { ...data, client_event_id: eventId },
+    }, { onSuccess: () => navigate(`/driver/trip/${trip.id}`) });
   };
 
   const handleDeliverySubmit = async () => {
@@ -88,12 +93,13 @@ export const DriverStop: React.FC = () => {
         <p className="text-xs text-slate-500">{stop.address}</p>
       </div>
 
+      {submitPickupMutation.error && <p role="alert" className="text-xs text-red-600">{submitPickupMutation.error.message}</p>}
       {/* Pickup vs Delivery Screen */}
-      {isPickup ? (
+      {isPickup && !receiptCrops.length ? <p className="text-xs text-slate-500">Assigned crop unavailable.</p> : isPickup ? (
         <ReceiptForm
           stopId={stop.id}
           tripId={trip.id}
-          crops={crops}
+          crops={receiptCrops}
           vehicleCapacityKg={trip.vehicle?.capacity_kg || 1000}
           currentTripKg={trip.total_actual_kg || 0}
           onSubmit={handlePickupSubmit}

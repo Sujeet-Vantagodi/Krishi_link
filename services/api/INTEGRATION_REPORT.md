@@ -1,5 +1,25 @@
 # KrishiLink frontend-first integration report
 
+## Final browser logistics continuation from `a240af6a24ff121acaf89832ee458df1727b11ee`
+
+The live UI now reads persisted buyer tracking and driver itineraries, and submits pickup assignment, driver arrival and pickup confirmation, hub grade intake, and measured transfer actions. Tracking shows unavailable states for missing telemetry and the handover code. Checkout still places a pending order. Last-mile delivery confirmation, external payment and payout execution, field device telemetry, production SMS and PostgreSQL deployment remain outside the verified browser flow.
+
+### Changed controls and files
+
+- `src/pages/admin/Dispatch.tsx` adds a destination hub select in the existing assignment pane. Live route suggestions without solver output are omitted. `src/components/admin/AssignDriverPanel.tsx` synchronizes the selected stop list.
+- `src/pages/admin/HubDetail.tsx` adds an existing-style receipt card with inbound trip, crop, measured total, Grade A, Grade B and rejects. Its options come from arrived trips and confirmed pickup receipts.
+- `src/pages/admin/Transfers.tsx` and `src/components/admin/TransferRequestCard.tsx` use the existing dialog for compatible trip or recorded driver/vehicle selection and measured sent/received fields. Assigned cards gain a dispatch action.
+- `src/pages/buyer/OrderTracking.tsx` reads persisted status, driver and GPS when available. `src/pages/driver/{DriverTrip,DriverTrips,DriverStop}.tsx`, `src/components/trip/{ReceiptForm,StatusStepper}.tsx`, `src/features/trips/hooks.ts`, and `src/lib/api/index.ts` connect the existing trip and receipt controls.
+- Backend changes are in `app/routers/{admin,driver,hubs,transfers}.py`, `app/schemas/trip.py`, `app/services/trip_service.py`, and `app/seed_dev.py`. Browser tests are in `tests/frontend_smoke.mjs`. The audit, requirements and report were updated. Theme, navigation, branding and teammate-owned database files were unchanged.
+
+### Verification
+
+- Full backend `python -m pytest -q --tb=short` passed **66 tests** with 10 deprecation warnings. OpenAPI generated **88 paths**.
+- `node_modules/.bin/tsc.cmd --noEmit`, `npm.cmd run build` for live and demo, and `git diff --check` passed.
+- `node services/api/tests/frontend_smoke.mjs live` passed against the real FastAPI server and a fresh, dedicated SQLite demo database. It drove harvest submission, admin pickup assignment, driver acknowledgement/start/arrival/receipt, hub-staff weigh-in, driver return, admin transfer assignment/dispatch, transfer driver arrival, and destination receipt by an authorized admin. The browser then placed an order, reloaded its history, opened persisted tracking, and displayed the resulting farmer settlement.
+- The smoke uses test-device geolocation matching the persisted farm location. It directly checks a driver is forbidden from hub intake, creates the initial transfer fixture through HTTP, and reads the inventory ledger through HTTP. Ledger deltas were +23 kg accepted pickup, −9 kg dispatched and +8 kg received. Settlement calculation was triggered by the admin API, then its 23 kg result was checked in the farmer UI.
+- `node services/api/tests/frontend_smoke.mjs screenshots` produced 12 pixel-identical desktop/mobile route pairs compared with the established original frontend baseline. `controls-before` and the live smoke produced 12 before/after desktop/mobile images covering dispatch, hub intake and the transfer dialog. The images are under the local verification directory `logistics-controls`. The new select, grade-entry card and transfer dialog intentionally differ from their original screens. Their underlying layout, styles and navigation use the existing design system.
+
 ## Core logistics continuation from `1e6253a8d03f7d8cc048d10a6cf15ea82aa92553`
 
 | Workflow | Result |

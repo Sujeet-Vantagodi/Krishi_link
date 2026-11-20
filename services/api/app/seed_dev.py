@@ -84,13 +84,14 @@ def seed() -> dict[str, str]:
                 db.add(crop)
                 db.flush()
             crops.append(crop)
-            if db.scalar(select(PublishedPrice).where(PublishedPrice.date == today, PublishedPrice.crop_id == crop.id)) is None:
-                db.add(PublishedPrice(date=today, crop_id=crop.id, low=20, high=40, reference=30, published_by=users[UserRole.ADMIN][0].id))
+            for quote_day in (today, today + timedelta(days=1)):
+                if db.scalar(select(PublishedPrice).where(PublishedPrice.date == quote_day, PublishedPrice.crop_id == crop.id)) is None:
+                    db.add(PublishedPrice(date=quote_day, crop_id=crop.id, low=20, high=40, reference=30, published_by=users[UserRole.ADMIN][0].id))
 
         farmers, buyers, drivers = users[UserRole.FARMER], users[UserRole.BUYER], users[UserRole.DRIVER]
         for i, farmer_user in enumerate(farmers):
             if db.get(Farmer, farmer_user.id) is None:
-                db.add(Farmer(user_id=farmer_user.id, village=["Vemgal", "Nandi", "Devanahalli"][i], taluk=["Kolar", "Chikkaballapur", "Devanahalli"][i], district="Karnataka", nearest_hub_id=[village_a.id, village_b.id, village_a.id][i], default_min_kg=5, approved=True))
+                db.add(Farmer(user_id=farmer_user.id, village=["Vemgal", "Nandi", "Devanahalli"][i], taluk=["Kolar", "Chikkaballapur", "Devanahalli"][i], district="Karnataka", nearest_hub_id=[village_a.id, village_b.id, village_a.id][i], location=[village_a.location, village_b.location, village_a.location][i], default_min_kg=5, approved=True))
             listing = db.scalar(select(FarmerListing).where(FarmerListing.farmer_id == farmer_user.id, FarmerListing.crop_id == crops[i].id, FarmerListing.listing_date == today))
             if listing is None:
                 db.add(FarmerListing(farmer_id=farmer_user.id, crop_id=crops[i].id, listing_date=today, est_kg=75 + i * 10, status=ListingStatus.ELIGIBLE, min_kg_applied=5))

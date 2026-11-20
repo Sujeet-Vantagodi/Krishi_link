@@ -7,6 +7,8 @@ import {
   Order,
   FarmerListing,
   Trip,
+  TripStop,
+  Vehicle,
   Hub,
   StockStatus,
   TransferRequest,
@@ -322,7 +324,19 @@ export async function cancelOrder(id: string): Promise<{ success: boolean }> {
 }
 
 export async function getOrderTracking(id: string) {
-  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
+  if (!API_DEMO_MODE) {
+    return requestApi<{
+      order_id: string;
+      status: Order['status'];
+      driver?: { name?: string; phone?: string; vehicle_no?: string };
+      vehicle: (Trip['current_location']) | null;
+      destination: TripStop['location'] | null;
+      eta_minutes: number | null;
+      trip_id?: string;
+      route_polyline?: Trip['route_polyline'];
+      delivery_otp?: string;
+    }>(`/orders/${encodeURIComponent(id)}/tracking`);
+  }
   await delay(200);
   const order = mockDb.orders.find((o) => o.id === id);
   if (!order) throw new ApiError('NOT_FOUND', 'Order not found');
@@ -526,17 +540,46 @@ export async function getFarmerPayments(farmerId = 'u_farmer_1'): Promise<Farmer
 // ==================== 4. DRIVER ENDPOINTS ====================
 
 export async function getDriverTrips(driverId = 'u_driver_1'): Promise<Trip[]> {
-  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
+  if (!API_DEMO_MODE) {
+    const rows = await requestApi<{ id: string }[]>('/driver/me/trips');
+    return Promise.all(rows.map(({ id }) => getDriverTripById(id)));
+  }
   await delay(200);
   return mockDb.trips.filter((t) => t.driver_id === driverId);
 }
 
 export async function getDriverTripById(id: string): Promise<Trip> {
-  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
+  if (!API_DEMO_MODE) return presentTrip(await requestApi<TripRecord>(`/driver/me/trips/${encodeURIComponent(id)}`));
   await delay(150);
   const trip = mockDb.trips.find((t) => t.id === id);
   if (!trip) throw new ApiError('NOT_FOUND', 'Trip not found');
   return trip;
+}
+
+type TripRecord = Pick<Trip, 'id' | 'type' | 'status' | 'driver_id' | 'vehicle_id' | 'vehicle'> & {
+  origin_hub_id?: string;
+  dest_hub_id?: string;
+  created_at: string;
+  planned_start?: string;
+  started_at?: string;
+  ended_at?: string;
+  stops: (TripStop & { buyer_order_id?: string; skip_reason?: string; crop_id?: string })[];
+};
+
+function presentTrip(record: TripRecord): Trip {
+  const stops = record.stops.map((stop) => ({
+    ...stop, trip_id: record.id, name: stop.name || 'Stop details unavailable',
+    address: stop.address ?? '', eta: stop.eta ?? '',
+    order_id: stop.buyer_order_id, skipped_reason: stop.skip_reason,
+  }));
+  return {
+    ...record, stops, hub_id: record.dest_hub_id ?? record.origin_hub_id ?? '',
+    date: (record.planned_start ?? record.created_at).slice(0, 10),
+    start_time: record.started_at, end_time: record.ended_at,
+    total_planned_kg: stops.reduce((sum, stop) => sum + (stop.expected_kg ?? 0), 0),
+    total_actual_kg: stops.flatMap((stop) => stop.receipt_lines ?? []).reduce((sum, line) => sum + line.kg_received, 0),
+    route_polyline: [],
+  };
 }
 
 export async function acknowledgeTrip(id: string): Promise<{ status: string }> {
@@ -570,8 +613,18 @@ export async function arriveAtStop(
   _coords?: { lat: number; lng: number }
 ): Promise<{ stop_status: string }> {
   if (!API_DEMO_MODE) {
-    if (!_coords) throw new ApiError('LOCATION_REQUIRED', 'Stop arrival requires actual coordinates');
-    const result = await stopAction(tripId, stopId, 'arrive', _coords);
+    const coords = _coords ?? await new Promise<{ lat: number; lng: number }>((resolve, reject) => {
+      if (!navigator.geolocation) {
+        reject(new ApiError('LOCATION_REQUIRED', 'Device location is unavailable'));
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        ({ coords }) => resolve({ lat: coords.latitude, lng: coords.longitude }),
+        () => reject(new ApiError('LOCATION_REQUIRED', 'Allow device location to record arrival')),
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 },
+      );
+    });
+    const result = await stopAction(tripId, stopId, 'arrive', coords);
     return { stop_status: result.status };
   }
   await delay(200);
@@ -587,9 +640,18 @@ export async function arriveAtStop(
 export async function submitPickupReceipt(
   tripId: string,
   stopId: string,
-  data: { lines: any[]; farmer_confirmation: { method: string } }
+  data: { lines: any[]; farmer_confirmation: { method: string }; client_event_id?: string }
 ) {
-  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
+  if (!API_DEMO_MODE) {
+    if (data.lines.length !== 1 || !data.client_event_id || data.farmer_confirmation.method !== 'TAP') {
+      throw new ApiError('RECEIPT_EVIDENCE_REQUIRED', 'Record the measured grade and farmer confirmation for the assigned crop');
+    }
+    const { crop_id, kg_received, grade } = data.lines[0];
+    await stopAction(tripId, stopId, 'receipt', { crop_id, kg_received, grade, farmer_confirmed: true,
+                                                  client_event_id: data.client_event_id });
+    const stop = await stopAction(tripId, stopId, 'complete-pickup', undefined);
+    return { success: true, stop_status: stop.status };
+  }
   await delay(350);
   const trip = mockDb.trips.find((t) => t.id === tripId);
   const stop = trip?.stops.find((s) => s.id === stopId);
@@ -845,7 +907,21 @@ export async function updateTransferStatus(id: string, status: any) {
 // ==================== 7. ADMIN DISPATCH & FLEET ====================
 
 export async function getDispatchPool() {
-  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
+  if (!API_DEMO_MODE) {
+    const [pool, crops, transfers] = await Promise.all([
+      requestApi<{ pending_pickups: (ListingResponse & { location?: TripStop['location']; village?: string })[] }>('/admin/dispatch/pool?upcoming=true'),
+      getCrops(),
+      getTransfers(),
+    ]);
+    const listings = pool.pending_pickups.filter((item) => item.min_kg_applied !== null).map((item) =>
+      toListing(item, crops.find((crop) => crop.id === item.crop_id)));
+    return {
+      farmer_pickups: listings.filter((item) => item.status === 'ELIGIBLE'),
+      ineligible_pickups: listings.filter((item) => item.status === 'INELIGIBLE'),
+      buyer_deliveries: [] as Order[],
+      pending_transfers: transfers.filter((row) => row.status === 'APPROVED' || row.status === 'REQUESTED'),
+    };
+  }
   await delay(220);
   return {
     farmer_pickups: mockDb.listings.filter((l) => l.status === 'ELIGIBLE'),
@@ -864,7 +940,12 @@ export async function assignTrip(data: {
   stops: any[];
   type?: any;
 }): Promise<Trip> {
-  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
+  if (!API_DEMO_MODE) {
+    return presentTrip(await requestApi<TripRecord>('/admin/assign', 'POST', {
+      driver_user_id: data.driver_id, vehicle_id: data.vehicle_id, dest_hub_id: data.hub_id,
+      stops: data.stops.map((stop) => ({ type: 'PICKUP', listing_id: stop.id.replace(/^stop_/, '') })),
+    }));
+  }
   await delay(400);
   const driver = mockDb.users.find((u) => u.id === data.driver_id);
   const vehicle = mockDb.vehicles.find((v) => v.id === data.vehicle_id);
@@ -903,13 +984,16 @@ export async function assignTrip(data: {
 }
 
 export async function getAdminTrips(): Promise<Trip[]> {
-  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
+  if (!API_DEMO_MODE) {
+    const { items } = await requestApi<{ items: { id: string }[] }>('/admin/trips');
+    return Promise.all(items.map(({ id }) => getAdminTripById(id)));
+  }
   await delay(200);
   return [...mockDb.trips];
 }
 
 export async function getAdminTripById(id: string): Promise<Trip> {
-  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
+  if (!API_DEMO_MODE) return presentTrip(await requestApi<TripRecord>(`/admin/trips/${encodeURIComponent(id)}`));
   await delay(150);
   const trip = mockDb.trips.find((t) => t.id === id);
   if (!trip) throw new ApiError('NOT_FOUND', 'Trip not found');
@@ -917,7 +1001,10 @@ export async function getAdminTripById(id: string): Promise<Trip> {
 }
 
 export async function getAvailableDrivers() {
-  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
+  if (!API_DEMO_MODE) {
+    const drivers = await requestApi<{ user_id: string; name: string; on_duty: boolean; vehicle?: Vehicle; active_trips: number }[]>('/admin/drivers/available');
+    return drivers.filter((driver) => driver.active_trips === 0 && driver.vehicle);
+  }
   await delay(150);
   return mockDb.drivers.map((d) => {
     const user = mockDb.users.find((u) => u.id === d.user_id);

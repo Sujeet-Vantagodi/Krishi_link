@@ -145,6 +145,8 @@ def list_available_drivers(db: Session) -> list:
             "vehicle_reg": v.reg_no if v else None,
             "vehicle_capacity_kg": float(v.capacity_kg) if v else None,
             "active_trips": active_trips,
+            "vehicle": {"id": v.id, "reg_no": v.reg_no, "type": v.type, "capacity_kg": float(v.capacity_kg),
+                        "ownership": v.ownership, "active": v.active} if v and v.active else None,
         })
     return result
 
@@ -167,7 +169,7 @@ def create_and_assign_trip(
 ) -> Trip:
     # Validate driver exists
     driver = db.query(Driver).filter(Driver.user_id == driver_user_id).first()
-    if not driver:
+    if not driver or not driver.user.is_active:
         raise NotFoundException("Driver", driver_user_id)
 
     # Validate vehicle
@@ -207,6 +209,7 @@ def create_and_assign_trip(
     db.flush()  # get trip.id
 
     # Link delivery orders atomically with dispatch so buyer status follows the trip.
+    planned_pickup_kg = 0.0
     for seq, stop_def in enumerate(stops_data or []):
         # Route payloads are validated as UUIDs by Pydantic, but direct service
         # callers and internal jobs may pass strings. Normalize at this boundary
@@ -240,6 +243,11 @@ def create_and_assign_trip(
             farmer = db.get(Farmer, listing.farmer_id)
             if farmer and farmer.location:
                 stop.location = farmer.location
+            if not stop.location:
+                raise BusinessRuleException("Pickup assignment requires a recorded farm location")
+            planned_pickup_kg += float(listing.est_kg)
+            if planned_pickup_kg > float(vehicle.capacity_kg):
+                raise BusinessRuleException("Pickup load exceeds vehicle capacity")
             listing.status = ListingStatus.SCHEDULED
             db.flush()
         db.add(stop)
@@ -375,6 +383,13 @@ def record_receipt(
     effective_listing_id = listing_id or stop.listing_id
     if stop.listing_id and effective_listing_id != stop.listing_id:
         raise BusinessRuleException("Pickup receipt must use the assigned listing")
+    if stop.listing_id:
+        prior = db.query(PickupReceipt).filter_by(trip_stop_id=stop.id, listing_id=stop.listing_id).first()
+        if prior is not None:
+            if (prior.crop_id == crop_id and float(prior.kg_received) == kg_received
+                    and prior.grade == grade and prior.farmer_confirmed == farmer_confirmed):
+                return prior, True
+            raise ConflictException("This pickup already has a recorded measurement")
     if effective_listing_id:
         listing = db.query(FarmerListing).filter(FarmerListing.id == effective_listing_id).first()
         if not listing or listing.farmer_id != stop.farmer_id or listing.crop_id != crop_id:
@@ -410,6 +425,8 @@ def complete_stop(db: Session, trip_id: uuid.UUID, stop_id: uuid.UUID, actor: Us
     trip = get_trip_or_404(db, trip_id)
     _assert_trip_actor(trip, actor)
     stop = get_stop_or_404(db, trip_id, stop_id)
+    if stop.type == StopType.PICKUP and stop.status == StopStatus.COMPLETED:
+        return stop
     if trip.status != TripStatus.STARTED or stop.type != StopType.PICKUP:
         raise BusinessRuleException("Only a pickup stop on an active trip can be completed here")
     if not stop.receipts or any(not item.farmer_confirmed or item.grade is None for item in stop.receipts):

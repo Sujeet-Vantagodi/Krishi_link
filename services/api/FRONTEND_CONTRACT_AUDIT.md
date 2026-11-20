@@ -1,5 +1,15 @@
 # Frontend contract audit
 
+## Final browser logistics continuation from `a240af6`
+
+| Screen | Data and actions | Presentation change |
+| --- | --- | --- |
+| Buyer tracking | Existing tracking GET and polling consume persisted status and telemetry. Live mode bypasses demo realtime events and issue simulation. | Existing map panel and ETA area show an unavailable state when data is absent. Handover code is unavailable on reload because the API stores a verifier rather than plaintext. |
+| Pickup dispatch | Upcoming listing pool, eligible drivers, real vehicle records and assignment against the selected destination. Location and crop are loaded from the listing's persisted farmer relationship. | A destination hub select appears in the existing assignment pane. Live route suggestions without solver output are omitted. |
+| Driver itinerary and pickup | Driver-scoped detail and real status transitions. Arrival submits device coordinates. Pickup records one measured grade line for the assigned listing with a deliberate farmer confirmation, then completes the stop. | Existing trip controls and weight keypad remain. Demo-only prefills and simulated photo attachment are disabled in live mode. |
+| Hub receipt | Hub-scoped arrived trip and crop list, measured total and A/B/rejected inputs, with duplicate protection and saleable stock reconciliation. | A receipt panel uses the existing card, input and button styles. Previously the page had no receipt form. |
+| Transfers | Compatible transfer-trip lookup, optional creation with a known driver/vehicle, assignment, measured dispatch and measured receipt. | The existing board opens an existing-design dialog for trip selection and weight entry. Assigned cards gain a dispatch action. |
+
 ## Core logistics continuation from `1e6253a`
 
 | Operation | Live contract | Remaining boundary |

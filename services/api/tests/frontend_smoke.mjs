@@ -9,6 +9,18 @@ const frontend = process.env.KRISHILINK_FRONTEND_URL ?? 'http://127.0.0.1:5173';
 const api = process.env.KRISHILINK_API_URL ?? 'http://127.0.0.1:8000/api/v1';
 const artifacts = resolve(process.env.KRISHILINK_SCREENSHOTS ?? 'frontend-screenshots');
 const mode = process.argv[2] ?? 'screenshots';
+const controlArtifacts = process.env.KRISHILINK_CONTROL_SCREENSHOTS;
+
+async function captureControls(page, name) {
+  if (!controlArtifacts) return;
+  await mkdir(controlArtifacts, { recursive: true });
+  const previous = page.viewportSize();
+  for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['mobile', { width: 390, height: 844 }]]) {
+    await page.setViewportSize(viewport);
+    await page.screenshot({ path: resolve(controlArtifacts, `${name}-${size}.png`), animations: 'disabled' });
+  }
+  if (previous) await page.setViewportSize(previous);
+}
 
 const browser = await chromium.launch({
   executablePath: process.env.KRISHILINK_BROWSER_EXECUTABLE,
@@ -60,6 +72,27 @@ try {
       }
     }
     console.log('Captured 12 route screenshots');
+  } else if (mode === 'controls-before') {
+    assert.ok(controlArtifacts, 'Set KRISHILINK_CONTROL_SCREENSHOTS for controls-before');
+    const context = await browser.newContext();
+    try {
+      await context.addInitScript(() => {
+        localStorage.setItem('krishilink_user', JSON.stringify({ id: 'u_admin_1', name: 'Smoke Test', role: 'admin', language: 'en' }));
+        localStorage.setItem('krishilink_token', 'mock_jwt_admin');
+      });
+      const page = await context.newPage();
+      await page.goto(frontend + '/admin/hubs/h_main');
+      await page.getByText('Current Produce Inventory Status', { exact: true }).waitFor();
+      await captureControls(page, 'before-hub');
+      await page.goto(frontend + '/admin/transfers');
+      await page.getByText('Inter-Hub Stock Transfers', { exact: true }).waitFor();
+      await captureControls(page, 'before-transfer');
+      await page.goto(frontend + '/admin/dispatch');
+      await page.getByText('Driver & Vehicle Assignment', { exact: true }).waitFor();
+      await captureControls(page, 'before-dispatch');
+    } finally {
+      await context.close();
+    }
   } else if (mode === 'live') {
     const backend = await request.newContext();
     try {
@@ -73,6 +106,7 @@ try {
       const crop = (await catalog.json()).items.find((item) => item.slug === 'demo-tomato');
       assert.ok(crop?.price);
       const buyerContext = await browser.newContext();
+      let buyerSession;
       try {
         const page = await buyerContext.newPage();
         const phone = String(7000000000 + Math.floor(Math.random() * 999999999));
@@ -83,7 +117,9 @@ try {
         await page.locator('form input[type=password]').fill(password);
         const registration = page.waitForResponse((response) => response.url() === `${api}/auth/register`);
         await page.getByRole('button', { name: 'Create BUYER Account' }).click();
-        assert.equal((await registration).status(), 201);
+        const registrationResult = await registration;
+        assert.equal(registrationResult.status(), 201);
+        buyerSession = await registrationResult.json();
         await page.waitForURL('**/buyer');
         await page.evaluate(() => localStorage.clear());
         await page.goto(frontend + '/auth/login');
@@ -118,6 +154,9 @@ try {
         await page.reload();
         await page.getByText(`#${order.id}`, { exact: true }).waitFor();
         await page.getByText('PLACED', { exact: true }).first().waitFor();
+        await page.goto(frontend + `/buyer/orders/${order.id}`);
+        await page.getByText('GPS unavailable', { exact: true }).waitFor();
+        await page.getByText('ETA unavailable', { exact: true }).waitFor();
       } finally {
         await buyerContext.close();
       }
@@ -141,6 +180,7 @@ try {
       }
       assert.equal((await backend.get(api + path)).status(), 401);
       const target = original.default_min_kg + 10;
+      let submittedListing;
       const context = await browser.newContext();
       try {
         await context.addInitScript(({ user, access_token }) => {
@@ -174,6 +214,7 @@ try {
         const listingResponse = await created;
         assert.equal(listingResponse.status(), 201);
         const listing = await listingResponse.json();
+        submittedListing = listing;
         assert.equal(listing.crop_id, crop.id);
         assert.equal(listing.est_kg, 50);
         const afterReload = page.waitForResponse((response) =>
@@ -239,11 +280,88 @@ try {
         const [statement] = (await statements.json()).items;
         assert.ok(statement?.farmer_name);
         await page.getByText(statement.farmer_name, { exact: true }).first().waitFor();
+        const driverLogin = await backend.post(`${api}/auth/demo-login`, { data: { role: 'driver' } });
+        const driverSession = await driverLogin.json();
+        assert.equal(driverLogin.status(), 200);
+        const driverHeaders = { Authorization: `Bearer ${driverSession.access_token}` };
+        const operatorHeaders = { Authorization: `Bearer ${adminSession.access_token}` };
+        const allHubs = (await (await backend.get(`${api}/hubs`)).json()).items;
+        const central = allHubs.find((item) => item.type === 'main');
+        const city = allHubs.find((item) => item.type === 'city');
+        const driverRecord = (await (await backend.get(`${api}/admin/drivers/available`, { headers: operatorHeaders })).json())
+          .find((item) => item.user_id === driverSession.user.id);
+        await page.goto(frontend + '/admin/dispatch');
+        await page.getByText(`${submittedListing.est_kg} kg`, { exact: true }).first().click();
+        await page.getByLabel('Destination hub').selectOption(central.id);
+        const selects = page.locator('select');
+        await selects.nth(1).selectOption(driverSession.user.id);
+        await selects.nth(2).selectOption(driverRecord.vehicle.id);
+        await captureControls(page, 'after-dispatch');
+        const assignment = page.waitForResponse((response) => response.url() === `${api}/admin/assign`);
+        await page.getByRole('button', { name: /assign.*trip|dispatch.*trip/i }).last().click();
+        const assignmentResult = await assignment;
+        assert.equal(assignmentResult.status(), 201, await assignmentResult.text());
+        const pickup = await assignmentResult.json();
+        assert.equal(pickup.stops[0].listing_id, submittedListing.id);
+        const { lat, lng } = pickup.stops[0].location;
+        const driverContext = await browser.newContext({ permissions: ['geolocation'], geolocation: { latitude: lat, longitude: lng } });
+        try {
+          await driverContext.addInitScript(({ user, access_token }) => {
+            localStorage.setItem('krishilink_user', JSON.stringify(user));
+            localStorage.setItem('krishilink_token', access_token);
+          }, driverSession);
+          const driverPage = await driverContext.newPage();
+          await driverPage.goto(frontend + '/driver');
+          const acknowledge = driverPage.waitForResponse((response) => response.url() === `${api}/trips/${pickup.id}/acknowledge`);
+          await driverPage.getByRole('button', { name: /acknowledge trip/i }).first().click();
+          assert.equal((await acknowledge).status(), 200);
+          await driverPage.goto(frontend + `/driver/trip/${pickup.id}`);
+          await driverPage.getByRole('button', { name: /start trip/i }).click();
+          await driverPage.getByRole('button', { name: /arrived at location/i }).click();
+          await driverPage.getByRole('button', { name: /record produce/i }).click();
+          await driverPage.getByRole('button', { name: '+25', exact: true }).click();
+          await driverPage.getByText('Farmer witnessed weighing on scale', { exact: true }).click();
+          const completed = driverPage.waitForResponse((response) => response.url().endsWith('/complete-pickup'));
+          await driverPage.getByRole('button', { name: /confirm & complete stop/i }).click();
+          assert.equal((await completed).status(), 200);
+          await driverPage.getByRole('button', { name: /reached hub/i }).click();
+          await driverPage.getByRole('button', { name: /return to base/i }).waitFor();
+          const forbidden = await backend.get(`${api}/hubs/${central.id}/inbound-trips`, { headers: driverHeaders });
+          assert.equal(forbidden.status(), 403);
+          const staffLogin = await backend.post(`${api}/auth/demo-login`, { data: { role: 'hub_staff' } });
+          assert.equal(staffLogin.status(), 200);
+          const staffContext = await browser.newContext();
+          try {
+            await staffContext.addInitScript(({ user, access_token }) => {
+              localStorage.setItem('krishilink_user', JSON.stringify(user));
+              localStorage.setItem('krishilink_token', access_token);
+            }, await staffLogin.json());
+            const hubPage = await staffContext.newPage();
+            await hubPage.goto(frontend + `/admin/hubs/${central.id}`);
+            await hubPage.getByLabel('Inbound trip').selectOption(pickup.id);
+            await hubPage.getByLabel('Crop').selectOption(crop.id);
+            await captureControls(hubPage, 'after-hub');
+            await hubPage.getByLabel('Measured total (kg)').fill('24');
+            await hubPage.getByLabel('Grade A (kg)').fill('22');
+            await hubPage.getByLabel('Grade B (kg)').fill('1');
+            await hubPage.getByLabel('Rejected (kg)').fill('1');
+            await hubPage.getByRole('button', { name: 'Record Hub Receipt' }).click();
+            await hubPage.getByText('Hub receipt recorded.', { exact: true }).waitFor();
+            await hubPage.reload();
+            await hubPage.getByLabel('Inbound trip').waitFor();
+            assert.equal(await hubPage.locator(`option[value="${pickup.id}"]`).count(), 0);
+          } finally {
+            await staffContext.close();
+          }
+          await driverPage.getByRole('button', { name: /return to base/i }).click();
+          await driverPage.getByText(/trip completed & returned/i).waitFor();
+        } finally {
+          await driverContext.close();
+        }
         const transfers = `${api}/transfers`;
-        const [origin, destination] = (await (await backend.get(`${api}/hubs`)).json()).items;
         const newTransfer = await backend.post(transfers, {
-          headers: { Authorization: `Bearer ${adminSession.access_token}` },
-          data: { from_hub_id: origin.id, to_hub_id: destination.id, crop_id: crop.id, requested_kg: 9, urgency: 'HIGH' },
+          headers: operatorHeaders,
+          data: { from_hub_id: central.id, to_hub_id: city.id, crop_id: crop.id, requested_kg: 9, urgency: 'HIGH' },
         });
         assert.equal(newTransfer.status(), 201);
         await page.goto(frontend + '/admin/transfers');
@@ -257,10 +375,92 @@ try {
         await page.reload();
         assert.ok((await (await reloadedTransfers).json()).items.some(({ id, status }) =>
           id === updated.id && status === 'APPROVED'));
+        await page.getByRole('button', { name: 'Assign Transfer Trip', exact: true }).first().click();
+        await page.getByLabel('Transfer trip').selectOption(`driver:${driverSession.user.id}`);
+        await captureControls(page, 'after-transfer');
+        const assignedTransfer = page.waitForResponse((response) => response.url() === `${transfers}/${updated.id}/assign`);
+        await page.getByRole('button', { name: 'Confirm', exact: true }).click();
+        const assignedResult = await assignedTransfer;
+        assert.equal(assignedResult.status(), 200);
+        const transferTrip = (await assignedResult.json()).trip_id;
+        await page.getByRole('button', { name: 'Dispatch Transfer', exact: true }).click();
+        await page.getByLabel('Measured sent weight (kg)', { exact: true }).fill('9');
+        const dispatched = page.waitForResponse((response) => response.url() === `${transfers}/${updated.id}/dispatch`);
+        await page.getByRole('button', { name: 'Confirm', exact: true }).click();
+        assert.equal((await dispatched).status(), 200);
+        const transferDriver = await browser.newContext();
+        try {
+          await transferDriver.addInitScript(({ user, access_token }) => {
+            localStorage.setItem('krishilink_user', JSON.stringify(user));
+            localStorage.setItem('krishilink_token', access_token);
+          }, driverSession);
+          const route = await transferDriver.newPage();
+          await route.goto(frontend + '/driver');
+          const acknowledge = route.waitForResponse((response) => response.url() === `${api}/trips/${transferTrip}/acknowledge`);
+          await route.getByRole('button', { name: /acknowledge trip/i }).first().click();
+          assert.equal((await acknowledge).status(), 200);
+          await route.goto(frontend + `/driver/trip/${transferTrip}`);
+          await route.getByRole('button', { name: /start trip/i }).click();
+          await route.getByRole('button', { name: /reached hub/i }).click();
+          await route.getByRole('button', { name: /return to base/i }).waitFor();
+        } finally {
+          await transferDriver.close();
+        }
+        await page.getByRole('button', { name: 'Confirm Received at Hub', exact: true }).click();
+        await page.getByLabel('Measured received weight (kg)', { exact: true }).fill('8');
+        const received = page.waitForResponse((response) => response.url() === `${transfers}/${updated.id}/receive`);
+        await page.getByRole('button', { name: 'Confirm', exact: true }).click();
+        assert.equal((await received).status(), 200);
+        const receiveReload = page.waitForResponse((response) => response.url() === transfers);
+        await page.reload();
+        assert.ok((await (await receiveReload).json()).items.some(({ id, status, received_kg }) =>
+          id === updated.id && status === 'RECEIVED' && received_kg === 8));
+        const ledger = (await (await backend.get(`${api}/hubs/${city.id}/stock-ledger`, { headers: operatorHeaders })).json()).items;
+        assert.ok(ledger.some((entry) => entry.reason === 'TRANSFER_IN' && entry.delta_kg === 8));
+        const sourceLedger = (await (await backend.get(`${api}/hubs/${central.id}/stock-ledger`, { headers: operatorHeaders })).json()).items;
+        assert.ok(sourceLedger.some((entry) => entry.reason === 'PICKUP' && entry.delta_kg === 23));
+        assert.ok(sourceLedger.some((entry) => entry.reason === 'TRANSFER_OUT' && entry.delta_kg === -9));
+        const finalBuyer = await browser.newContext();
+        const finalFarmer = await browser.newContext();
+        try {
+          for (const [roleContext, auth] of [[finalBuyer, buyerSession], [finalFarmer, session]]) {
+            await roleContext.addInitScript(({ user, access_token }) => {
+              localStorage.setItem('krishilink_user', JSON.stringify(user));
+              localStorage.setItem('krishilink_token', access_token);
+            }, auth);
+          }
+          const checkoutPage = await finalBuyer.newPage();
+          await checkoutPage.goto(frontend + `/buyer/crop/${crop.id}`);
+          await checkoutPage.getByRole('button', { name: 'ADD', exact: true }).click();
+          await checkoutPage.getByRole('button', { name: /view cart/i }).click();
+          await checkoutPage.getByRole('button', { name: 'Proceed to Checkout' }).click();
+          const created = checkoutPage.waitForResponse((response) => response.url() === `${api}/orders/checkout`);
+          await checkoutPage.getByRole('button', { name: 'Confirm & Place Order' }).click();
+          const orderResponse = await created;
+          assert.equal(orderResponse.status(), 201);
+          const order = await orderResponse.json();
+          await checkoutPage.getByRole('button', { name: 'View All Orders' }).click();
+          await checkoutPage.reload();
+          await checkoutPage.getByText(`#${order.id}`, { exact: true }).waitFor();
+          await checkoutPage.goto(frontend + `/buyer/orders/${order.id}`);
+          await checkoutPage.getByText('PLACED', { exact: true }).waitFor();
+          const calculated = await backend.post(`${api}/admin/settlements/calculate?settle_date=${submittedListing.listing_date}`, { headers: operatorHeaders });
+          assert.equal(calculated.status(), 200);
+          const settlement = (await calculated.json()).items.find((item) => item.farmer_id === session.user.id);
+          assert.equal(settlement?.accepted_kg, 23);
+          const farmerPage = await finalFarmer.newPage();
+          const paid = farmerPage.waitForResponse((response) => response.url() === `${api}/farmers/me/settlements`);
+          await farmerPage.goto(frontend + '/farmer/payments');
+          assert.ok((await (await paid).json()).items.some(({ id }) => id === settlement.id));
+          await farmerPage.getByText(/23 kg/i).first().waitFor();
+        } finally {
+          await finalBuyer.close();
+          await finalFarmer.close();
+        }
       } finally {
         await adminContext.close();
       }
-      console.log('Live auth, catalog, checkout/history, harvest, hub stock, reconciled settlements and transfer approval passed');
+      console.log('Live auth, checkout/history/tracking, harvest, pickup assignment, driver receipts, hub intake, settlement review and measured transfers passed');
     } finally {
       await backend.dispose();
     }
