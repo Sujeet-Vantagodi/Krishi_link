@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuthStore } from '../../stores/authStore';
+import { API_BASE_URL } from '../../lib/api/client';
 import { Button } from '../../components/ui/button';
 import {
   Store,
@@ -40,13 +41,57 @@ export const BuyerAccount: React.FC = () => {
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
 
-  const handleSaveProfile = () => {
+  useEffect(() => {
+    if (user) {
+      if (user.name) {
+        setBusinessName(user.name);
+        setContactPerson(user.name);
+      }
+      if (user.phone) setPhone(user.phone);
+      if (user.email) setEmail(user.email);
+      if (user.profile) {
+        if (user.profile.business_name) setBusinessName(user.profile.business_name);
+        if (user.profile.business_type) setBusinessType(user.profile.business_type);
+        if (user.profile.address) setAddress(user.profile.address);
+        if (user.profile.gstin) setGstin(user.profile.gstin);
+      }
+    }
+  }, [user]);
+
+  const handleSaveProfile = async () => {
     if (user) {
       setUser({
         ...user,
         name: businessName,
         phone: phone,
+        email: email,
       });
+
+      try {
+        const token = localStorage.getItem('krishilink_token');
+        if (token) {
+          await fetch(`${API_BASE_URL}/me`, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              name: businessName,
+              phone: phone,
+              email: email,
+              profile: {
+                business_name: businessName,
+                business_type: businessType,
+                address: address,
+                gstin: gstin,
+              },
+            }),
+          });
+        }
+      } catch (e) {
+        console.warn('Could not sync buyer profile to backend:', e);
+      }
     }
     setEditModalOpen(false);
     setSavedSuccess(true);

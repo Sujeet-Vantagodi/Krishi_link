@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard,
@@ -36,12 +36,13 @@ import { useTranslation } from 'react-i18next';
 import { Logo } from '../components/common/Logo';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '../components/ui/dialog';
 import { Button } from '../components/ui/button';
+import { API_BASE_URL } from '../lib/api/client';
 
 export const AdminLayout: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { darkMode, toggleDarkMode, sidebarOpen, toggleSidebar } = useUiStore();
-  const { user, setUser, logout } = useAuthStore();
+  const { user, setUser, logout, fetchCurrentUser } = useAuthStore();
   const { data: alerts = [] } = useAlerts();
   const { t } = useTranslation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -49,14 +50,73 @@ export const AdminLayout: React.FC = () => {
 
   // Admin profile state
   const [adminName, setAdminName] = useState(user?.name || 'Anita Rao (Ops Tower)');
-  const [employeeId, setEmployeeId] = useState('KL-OPS-8841');
-  const [adminEmail, setAdminEmail] = useState('ops.tower@krishilink.in');
+  const [employeeId, setEmployeeId] = useState(user?.employee_id || 'KL-OPS-8841');
+  const [adminEmail, setAdminEmail] = useState(user?.email || 'ops.tower@krishilink.in');
   const [adminPhone, setAdminPhone] = useState(user?.phone || '+919876543204');
   const [adminRoleTitle, setAdminRoleTitle] = useState('Senior Logistics Control Tower Lead');
 
-  const handleSaveProfile = () => {
+  // Synchronize profile credentials directly from PostgreSQL database session
+  useEffect(() => {
+    fetchCurrentUser();
+  }, []);
+
+  useEffect(() => {
     if (user) {
-      setUser({ ...user, name: adminName, phone: adminPhone });
+      if (user.name) setAdminName(user.name);
+      if (user.phone) setAdminPhone(user.phone);
+      if (user.email) setAdminEmail(user.email);
+      if (user.employee_id) {
+        setEmployeeId(user.employee_id);
+      } else if (user.id) {
+        const cleanId = user.id.replace('u_admin_', '').slice(-6).toUpperCase();
+        setEmployeeId(`KL-OPS-${cleanId}`);
+      }
+      if (user.profile?.role_title) {
+        setAdminRoleTitle(user.profile.role_title);
+      }
+    }
+  }, [user]);
+
+  const displayName = user?.name || adminName || 'Admin';
+  const adminInitials = displayName
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w: string) => w[0]?.toUpperCase() || '')
+    .join('') || 'A';
+
+  const handleSaveProfile = async () => {
+    if (user) {
+      const updatedUser = {
+        ...user,
+        name: adminName,
+        phone: adminPhone,
+        email: adminEmail,
+        employee_id: employeeId,
+      };
+      setUser(updatedUser);
+
+      // Save directly to PostgreSQL database via live API
+      try {
+        const token = localStorage.getItem('krishilink_token');
+        if (token) {
+          await fetch(`${API_BASE_URL}/me`, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              name: adminName,
+              phone: adminPhone,
+              email: adminEmail,
+              employee_id: employeeId,
+            }),
+          });
+        }
+      } catch (err) {
+        console.warn('Failed to save profile to PostgreSQL:', err);
+      }
     }
     setProfileOpen(false);
   };
@@ -239,11 +299,11 @@ export const AdminLayout: React.FC = () => {
               title="Admin Account Profile"
             >
               <div className="h-7 w-7 rounded-lg bg-emerald-600 text-white font-black text-xs flex items-center justify-center shadow-sm">
-                AR
+                {adminInitials}
               </div>
               <div className="hidden xl:block text-left">
-                <p className="text-xs font-bold leading-tight text-slate-900 dark:text-white">{adminName}</p>
-                <p className="text-[10px] text-emerald-600 font-extrabold">SUPER ADMIN</p>
+                <p className="text-xs font-bold leading-tight text-slate-900 dark:text-white">{displayName}</p>
+                <p className="text-[10px] text-emerald-600 font-extrabold uppercase">{user?.role === 'admin' ? 'SUPER ADMIN' : user?.role || 'SUPER ADMIN'}</p>
               </div>
             </button>
           </div>
@@ -293,11 +353,11 @@ export const AdminLayout: React.FC = () => {
           <div className="space-y-4 my-3 text-xs">
             <div className="flex items-center gap-3 p-3 bg-slate-50 dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700">
               <div className="h-12 w-12 rounded-xl bg-emerald-600 text-white font-black text-lg flex items-center justify-center shrink-0">
-                AR
+                {adminInitials}
               </div>
               <div className="space-y-0.5">
                 <div className="flex items-center gap-2">
-                  <p className="font-extrabold text-sm text-slate-900 dark:text-white">{adminName}</p>
+                  <p className="font-extrabold text-sm text-slate-900 dark:text-white">{displayName}</p>
                   <span className="font-mono text-[10px] font-black px-2 py-0.5 rounded bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300">
                     ID: {employeeId}
                   </span>

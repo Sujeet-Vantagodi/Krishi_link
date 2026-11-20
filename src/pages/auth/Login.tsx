@@ -30,6 +30,7 @@ import { useTranslation } from 'react-i18next';
 import { LanguageSwitch } from '../../components/common/LanguageSwitch';
 import { Logo } from '../../components/common/Logo';
 import { Role, User as UserType } from '../../types';
+import { API_BASE_URL } from '../../lib/api/client';
 
 export const Login: React.FC = () => {
   const navigate = useNavigate();
@@ -94,7 +95,7 @@ export const Login: React.FC = () => {
     setLoginError(null);
 
     try {
-      const res = await fetch('http://localhost:8000/api/v1/auth/login', {
+      const res = await fetch(`${API_BASE_URL}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone, password }),
@@ -106,8 +107,11 @@ export const Login: React.FC = () => {
           id: data.user.id,
           name: data.user.name,
           phone: data.user.phone,
+          email: data.user.email,
           role: data.user.role as Role,
           language: data.user.language || (data.user.role === 'farmer' ? 'kn' : 'en'),
+          employee_id: data.user.employee_id || (data.user.profile && data.user.profile.employee_id),
+          profile: data.user.profile,
         };
 
         setUser(authenticatedUser);
@@ -229,7 +233,7 @@ export const Login: React.FC = () => {
         station: adminStation,
       };
 
-      const res = await fetch('http://localhost:8000/api/v1/auth/register', {
+      const res = await fetch(`${API_BASE_URL}/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(registerPayload),
@@ -241,8 +245,11 @@ export const Login: React.FC = () => {
           id: data.user.id,
           name: data.user.name,
           phone: data.user.phone,
+          email: data.user.email,
           role: data.user.role as Role,
           language: data.user.language || (data.user.role === 'farmer' ? 'kn' : 'en'),
+          employee_id: data.user.employee_id || (data.user.profile && data.user.profile.employee_id),
+          profile: data.user.profile,
         };
 
         mockDb.users.push(newUser);

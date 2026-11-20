@@ -214,7 +214,7 @@ def view_hubs(db):
             h.id,
             h.name,
             h.type,
-            h.taluk or "Bengaluru / Kolar",
+            getattr(h, 'taluk', None) or (h.address.split(',')[-2].strip() if h.address and ',' in h.address else "Bengaluru / Kolar"),
             f"{float(h.capacity_kg) / 1000:.1f} MT" if h.capacity_kg else "10.0 MT",
             "OPERATIONAL" if h.active else "INACTIVE"
         ])

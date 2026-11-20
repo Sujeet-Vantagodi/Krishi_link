@@ -112,6 +112,14 @@ class CreateOrderPayload(BaseModel):
     address: Optional[str] = None
     buyer_id: Optional[str] = None
 
+class UpdateUserPayload(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    employee_id: Optional[str] = None
+    language: Optional[str] = None
+    profile: Optional[Dict[str, Any]] = None
+
 # ==================== ENDPOINTS ====================
 
 @app.get("/")
@@ -141,6 +149,65 @@ def health_check(db: Session = Depends(get_db)):
     }
 
 # ---------- 1. AUTHENTICATION & CREDENTIALS ----------
+
+def format_user_response(user: User) -> Dict[str, Any]:
+    profile: Dict[str, Any] = {}
+    if user.role == "farmer" and user.farmer_profile:
+        fp = user.farmer_profile
+        profile = {
+            "village": fp.village,
+            "taluk": fp.taluk,
+            "district": fp.district,
+            "nearest_hub_id": fp.nearest_hub_id,
+            "land_acres": fp.land_acres,
+            "upi_id": fp.upi_id,
+            "reliability_score": fp.reliability_score
+        }
+    elif user.role == "buyer" and user.buyer_profile:
+        bp = user.buyer_profile
+        profile = {
+            "business_name": bp.business_name,
+            "business_type": bp.business_type,
+            "gstin": bp.gstin,
+            "address": bp.address,
+            "delivery_hub_id": bp.delivery_hub_id,
+            "credit_limit": bp.credit_limit,
+            "credit_due": bp.credit_due
+        }
+    elif user.role == "driver" and user.driver_profile:
+        dp = user.driver_profile
+        profile = {
+            "licence_no": dp.licence_no,
+            "vehicle_id": dp.vehicle_id,
+            "home_hub_id": dp.home_hub_id,
+            "on_duty": dp.on_duty
+        }
+    elif user.role in ("admin", "super_admin"):
+        clean_id = user.id.replace("u_admin_", "").upper()
+        profile = {
+            "employee_id": f"KL-OPS-{clean_id}" if clean_id else "KL-OPS-8841",
+            "role_title": "Super Administrator" if user.role == "super_admin" else "Operations Control Tower Lead",
+            "station": "Bengaluru Central Ops Hub (Yeshwanthpur APMC)"
+        }
+    elif user.role == "hub_staff":
+        staff_hub = user.staff_hubs[0].hub if user.staff_hubs else None
+        profile = {
+            "hub_id": staff_hub.id if staff_hub else None,
+            "hub_name": staff_hub.name if staff_hub else "Assigned Hub"
+        }
+
+    employee_id = profile.get("employee_id") if isinstance(profile, dict) else None
+
+    return {
+        "id": user.id,
+        "name": user.name,
+        "phone": user.phone,
+        "email": user.email,
+        "role": user.role,
+        "language": user.language,
+        "employee_id": employee_id,
+        "profile": profile
+    }
 
 @app.post("/api/v1/auth/register")
 def register_user(payload: RegisterPayload, db: Session = Depends(get_db)):
@@ -225,13 +292,7 @@ def register_user(payload: RegisterPayload, db: Session = Depends(get_db)):
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user": {
-            "id": new_user.id,
-            "name": new_user.name,
-            "phone": new_user.phone,
-            "role": new_user.role,
-            "language": new_user.language
-        }
+        "user": format_user_response(new_user)
     }
 
 @app.post("/api/v1/auth/login")
@@ -251,13 +312,7 @@ def login_with_password(payload: LoginPayload, db: Session = Depends(get_db)):
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user": {
-            "id": user.id,
-            "name": user.name,
-            "phone": user.phone,
-            "role": user.role,
-            "language": user.language
-        }
+        "user": format_user_response(user)
     }
 
 @app.post("/api/v1/auth/otp/request")
@@ -286,56 +341,53 @@ def verify_otp(payload: OtpVerifyPayload, db: Session = Depends(get_db)):
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user": {
-            "id": user.id,
-            "name": user.name,
-            "phone": user.phone,
-            "role": user.role,
-            "language": user.language
-        }
+        "user": format_user_response(user)
     }
 
+@app.get("/api/v1/auth/me")
 @app.get("/api/v1/me")
 def get_me(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    profile = None
-    if current_user.role == "farmer" and current_user.farmer_profile:
-        fp = current_user.farmer_profile
-        profile = {
-            "village": fp.village,
-            "taluk": fp.taluk,
-            "district": fp.district,
-            "nearest_hub_id": fp.nearest_hub_id,
-            "land_acres": fp.land_acres,
-            "upi_id": fp.upi_id,
-            "reliability_score": fp.reliability_score
-        }
-    elif current_user.role == "buyer" and current_user.buyer_profile:
-        bp = current_user.buyer_profile
-        profile = {
-            "business_name": bp.business_name,
-            "business_type": bp.business_type,
-            "gstin": bp.gstin,
-            "address": bp.address,
-            "delivery_hub_id": bp.delivery_hub_id,
-            "credit_limit": bp.credit_limit,
-            "credit_due": bp.credit_due
-        }
-    elif current_user.role == "driver" and current_user.driver_profile:
-        dp = current_user.driver_profile
-        profile = {
-            "licence_no": dp.licence_no,
-            "vehicle_id": dp.vehicle_id,
-            "home_hub_id": dp.home_hub_id,
-            "on_duty": dp.on_duty
-        }
+    return format_user_response(current_user)
 
+@app.put("/api/v1/auth/me")
+@app.put("/api/v1/me")
+def update_me(payload: UpdateUserPayload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if payload.name:
+        current_user.name = payload.name
+    if payload.email is not None:
+        current_user.email = payload.email
+    if payload.phone:
+        current_user.phone = payload.phone
+    if payload.language:
+        current_user.language = payload.language
+
+    # Role specific profile updates
+    if current_user.role == "farmer" and current_user.farmer_profile and payload.profile:
+        fp = current_user.farmer_profile
+        for field in ("village", "taluk", "district", "land_acres", "upi_id", "default_min_kg"):
+            if field in payload.profile and payload.profile[field] is not None:
+                setattr(fp, field, payload.profile[field])
+    elif current_user.role == "buyer" and current_user.buyer_profile and payload.profile:
+        bp = current_user.buyer_profile
+        for field in ("business_name", "business_type", "gstin", "address"):
+            if field in payload.profile and payload.profile[field] is not None:
+                setattr(bp, field, payload.profile[field])
+    elif current_user.role == "driver" and current_user.driver_profile and payload.profile:
+        dp = current_user.driver_profile
+        for field in ("licence_no", "on_duty"):
+            if field in payload.profile and payload.profile[field] is not None:
+                setattr(dp, field, payload.profile[field])
+
+    db.commit()
+    db.refresh(current_user)
+    return format_user_response(current_user)
+
+@app.get("/api/v1/admin/users")
+def list_admin_users(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    users = db.query(User).order_by(User.created_at.desc()).all()
     return {
-        "id": current_user.id,
-        "name": current_user.name,
-        "phone": current_user.phone,
-        "role": current_user.role,
-        "language": current_user.language,
-        "profile": profile
+        "count": len(users),
+        "users": [format_user_response(u) for u in users]
     }
 
 # ---------- 2. CROPS & CATALOG ----------

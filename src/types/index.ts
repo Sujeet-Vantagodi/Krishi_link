@@ -66,8 +66,11 @@ export interface User {
   phone: string;
   role: Role;
   name: string;
+  email?: string;
+  employee_id?: string;
   language: 'kn' | 'en';
   needs_onboarding?: boolean;
+  profile?: any;
 }
 
 export interface FarmerProfile {
