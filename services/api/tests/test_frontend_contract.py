@@ -241,3 +241,62 @@ def test_tracking_returns_only_persisted_telemetry(api, db_session, seed_data):
     db_session.add(LocationPing(trip_id=trip.id, ts=utc_now(), driver_id=driver.id, location={"lat": 12.8, "lng": 77.5}))
     db_session.commit()
     assert api.get(url, headers=headers).json()["vehicle"]["lat"] == 12.8
+
+
+def test_checkout_persists_pending_order_and_history(api, seed_data):
+    headers = make_auth_headers(seed_data["buyer_user"])
+    request = {"slot": "07:00-08:00", "payment_mode": "PREPAID", "address": "Verified test destination",
+               "items": [{"crop_id": str(seed_data["tomato"].id), "qty_kg": 10}]}
+    result = api.post("/api/v1/orders/checkout", headers=headers, json=request)
+    assert result.status_code == 201
+    created = result.json()
+    assert created["payment_status"] == "PENDING"
+    assert created["items"][0]["confirmed_kg"] == 0
+    assert created["items"][0]["price_per_kg_locked"] == 2600
+    assert created["address"] == request["address"]
+    assert created["total"] == 27500
+    path = f"/api/v1/orders/history/{created['id']}"
+    assert api.get(path, headers=headers).json()["delivery_code"] is None
+    assert api.get("/api/v1/orders/history?status=PLACED", headers=headers).json()["items"][0]["id"] == created["id"]
+    assert api.get(path).status_code == 401
+    assert api.post("/api/v1/orders/checkout", headers=headers, json={**request, "items": request["items"] * 2}).status_code == 422
+
+
+def test_pickup_assignment_completion_and_hub_grades(api, seed_data):
+    farmer = make_auth_headers(seed_data["farmer_user"])
+    admin = make_auth_headers(seed_data["admin_user"])
+    driver = make_auth_headers(seed_data["driver_user"])
+    staff = make_auth_headers(seed_data["hub_staff_user"])
+    crop_id = str(seed_data["tomato"].id)
+    listing = api.post("/api/v1/farmers/me/listings", headers=farmer, json={
+        "crop_id": crop_id, "est_kg": 25, "listing_date": date.today().isoformat(),
+    }).json()
+    assert listing["status"] == "ELIGIBLE"
+    location = {"lat": 13.2, "lng": 77.8}
+    assigned = api.post("/api/v1/admin/assign", headers=admin, json={
+        "driver_user_id": str(seed_data["driver_user"].id),
+        "vehicle_id": str(seed_data["vehicle"].id),
+        "dest_hub_id": str(seed_data["main_hub"].id),
+        "stops": [{"type": "PICKUP", "listing_id": listing["id"], "location": location}],
+    })
+    assert assigned.status_code == 201
+    itinerary = assigned.json()
+    trip = f"/api/v1/trips/{itinerary['id']}"
+    stop = f"{trip}/stops/{itinerary['stops'][0]['id']}"
+    assert api.post(f"{trip}/acknowledge", headers=farmer).status_code == 403
+    assert api.post(f"{trip}/acknowledge", headers=driver).status_code == 200
+    assert api.post(f"{trip}/start", headers=driver).status_code == 200
+    payload = {"crop_id": crop_id, "kg_received": 20, "grade": "A", "farmer_confirmed": True,
+               "client_event_id": str(uuid4())}
+    assert api.post(f"{stop}/receipt", headers=driver, json=payload).status_code == 422
+    assert api.post(f"{stop}/arrive", headers=driver, json=location).status_code == 200
+    assert api.post(f"{stop}/receipt", headers=driver, json=payload).status_code == 201
+    assert api.post(f"{stop}/complete-pickup", headers=driver).json()["status"] == "COMPLETED"
+    assert api.post(f"{trip}/reached-hub", headers=driver).status_code == 200
+    receipt_url = f"/api/v1/admin/trips/{itinerary['id']}/hub-receive?hub_id={seed_data['main_hub'].id}"
+    weights = {"crop_id": crop_id, "kg_hub": 19, "kg_driver": 20, "grade_a_kg": 17, "grade_b_kg": 1, "reject_kg": 1}
+    assert api.post(receipt_url, headers=staff, json={**weights, "reject_kg": 2}).status_code == 422
+    assert api.post(receipt_url, headers=staff, json=weights).status_code == 201
+    calculated = api.post(f"/api/v1/admin/settlements/calculate?settle_date={date.today()}", headers=admin)
+    assert calculated.status_code == 200
+    assert calculated.json()["items"][0]["accepted_kg"] == 18

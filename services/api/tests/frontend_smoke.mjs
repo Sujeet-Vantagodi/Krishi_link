@@ -102,6 +102,22 @@ try {
         assert.equal((await detail).status(), 200);
         await page.waitForURL(`**/buyer/crop/${crop.id}`);
         await page.getByText('Shelf Life', { exact: true }).waitFor();
+        await page.getByRole('button', { name: 'ADD', exact: true }).click();
+        await page.getByRole('button', { name: /view cart/i }).click();
+        await page.getByRole('button', { name: 'Proceed to Checkout' }).click();
+        const checkout = page.waitForResponse((response) => response.url() === `${api}/orders/checkout`);
+        await page.getByRole('button', { name: 'Confirm & Place Order' }).click();
+        const response = await checkout;
+        assert.equal(response.status(), 201);
+        const order = await response.json();
+        assert.equal(order.status, 'PLACED');
+        assert.equal(order.payment_status, 'PENDING');
+        await page.getByText('Order Placed Successfully!', { exact: true }).waitFor();
+        await page.getByRole('button', { name: 'View All Orders' }).click();
+        await page.getByText(`#${order.id}`, { exact: true }).waitFor();
+        await page.reload();
+        await page.getByText(`#${order.id}`, { exact: true }).waitFor();
+        await page.getByText('PLACED', { exact: true }).first().waitFor();
       } finally {
         await buyerContext.close();
       }
@@ -173,6 +189,26 @@ try {
       const adminLogin = await backend.post(`${api}/auth/demo-login`, { data: { role: 'admin' } });
       assert.equal(adminLogin.status(), 200);
       const adminSession = await adminLogin.json();
+      const settled = await backend.post(`${api}/admin/settlements/calculate?settle_date=${crop.price.date}`, {
+        headers: { Authorization: `Bearer ${adminSession.access_token}` },
+      });
+      assert.equal(settled.status(), 200);
+      const reconciliation = (await settled.json()).items.find(({ farmer_id }) => farmer_id === session.user.id);
+      assert.equal(reconciliation?.accepted_kg, 20);
+      const statementContext = await browser.newContext();
+      try {
+        await statementContext.addInitScript(({ user, access_token }) => {
+          localStorage.setItem('krishilink_user', JSON.stringify(user));
+          localStorage.setItem('krishilink_token', access_token);
+        }, session);
+        const page = await statementContext.newPage();
+        const statement = page.waitForResponse((response) => response.url() === `${api}/farmers/me/settlements`);
+        await page.goto(frontend + '/farmer/payments');
+        assert.ok((await (await statement).json()).items.some(({ id }) => id === reconciliation.id));
+        await page.getByText('Settlement Statements', { exact: true }).waitFor();
+      } finally {
+        await statementContext.close();
+      }
       const adminContext = await browser.newContext();
       try {
         await adminContext.addInitScript(({ user, access_token }) => {
@@ -224,7 +260,7 @@ try {
       } finally {
         await adminContext.close();
       }
-      console.log('Live registration, password login, development OTP, catalog/detail, harvest, hubs, settlements and transfer approval passed');
+      console.log('Live auth, catalog, checkout/history, harvest, hub stock, reconciled settlements and transfer approval passed');
     } finally {
       await backend.dispose();
     }

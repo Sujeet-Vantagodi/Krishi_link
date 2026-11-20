@@ -11,7 +11,7 @@ from app.models.enums import TransferStatus, UserRole
 from app.models.hub import HubStaff
 from app.models.trip import TransferRequest
 from app.models.user import User
-from app.schemas.transfer import TransferCreate, TransferDispatch, TransferOut, TransferReceive
+from app.schemas.transfer import TransferAssignment, TransferCreate, TransferDispatch, TransferOut, TransferReceive
 from app.services import transfer_service
 
 router = APIRouter(prefix="/transfers", tags=["Inter-hub Transfers"])
@@ -48,6 +48,12 @@ def approve_transfer(transfer_id: uuid.UUID, db: Session = Depends(get_db), user
 def reject_transfer(transfer_id: uuid.UUID, db: Session = Depends(get_db),
                     _: User = Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN))):
     return transfer_service.reject_transfer(db, transfer_id)
+
+
+@router.post("/{transfer_id}/assign", response_model=TransferOut)
+def assign_transfer(transfer_id: uuid.UUID, payload: TransferAssignment, db: Session = Depends(get_db),
+                    _: User = Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN))):
+    return transfer_service.assign_transfer(db, transfer_id, payload.trip_id)
 
 
 @router.post("/{transfer_id}/dispatch", response_model=TransferOut)

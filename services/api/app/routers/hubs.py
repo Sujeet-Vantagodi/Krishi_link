@@ -210,6 +210,8 @@ def api_hub_weigh_in(
     current_user: User = Depends(require_roles(UserRole.HUB_STAFF, UserRole.ADMIN, UserRole.SUPER_ADMIN)),
     db: Session = Depends(get_db)
 ):
+    from app.services.trip_service import hub_receive, verified_saleable_weight
+
     hub = db.query(Hub).filter(Hub.id == id).first()
     if not hub:
         raise NotFoundException("Hub", id)
@@ -221,14 +223,20 @@ def api_hub_weigh_in(
             raise NotFoundException("Trip", trip_id)
         if trip.status != TripStatus.AT_HUB or trip.dest_hub_id != id:
             raise ForbiddenException("Trip must be marked at its assigned destination hub before receipt")
-    lock_hub_inventory(db, id)
-    if trip_id and db.query(HubReceipt).filter(HubReceipt.trip_id == trip_id, HubReceipt.crop_id == crop_id).first():
-        raise ForbiddenException("A receipt for this trip and crop was already recorded")
 
     # Calculate weight variance
     variance_pct = None
     if kg_driver and kg_driver > 0:
         variance_pct = round(((kg_hub - kg_driver) / kg_driver) * 100, 2)
+
+    if trip_id:
+        receipt = hub_receive(db, trip_id, id, crop_id, kg_hub, kg_driver,
+                              grade_a_kg, grade_b_kg, reject_kg, current_user)
+        return {"message": "Hub weigh-in recorded and stock ledger updated",
+                "receipt_id": receipt.id, "kg_hub": kg_hub, "variance_pct": variance_pct}
+
+    accepted_kg = verified_saleable_weight(kg_hub, grade_a_kg, grade_b_kg, reject_kg)
+    lock_hub_inventory(db, id)
 
     receipt = HubReceipt(
         trip_id=trip_id,
@@ -243,7 +251,7 @@ def api_hub_weigh_in(
     )
     db.add(receipt)
     db.flush()
-    db.add(StockLedger(hub_id=id, crop_id=crop_id, delta_kg=kg_hub, reason=LedgerReason.PICKUP, created_by=current_user.id, ref_type="hub_receipt", ref_id=receipt.id))
+    db.add(StockLedger(hub_id=id, crop_id=crop_id, delta_kg=accepted_kg, reason=LedgerReason.PICKUP, created_by=current_user.id, ref_type="hub_receipt", ref_id=receipt.id))
     try:
         db.commit()
     except IntegrityError:

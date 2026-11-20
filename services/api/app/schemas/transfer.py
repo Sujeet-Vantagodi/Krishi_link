@@ -16,8 +16,11 @@ class TransferCreate(BaseModel):
     urgency: TransferUrgency = "NORMAL"
 
 
-class TransferDispatch(BaseModel):
+class TransferAssignment(BaseModel):
     trip_id: uuid.UUID
+
+
+class TransferDispatch(TransferAssignment):
     sent_kg: float = Field(gt=0)
 
 

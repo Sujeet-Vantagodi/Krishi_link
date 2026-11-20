@@ -10,6 +10,7 @@ from app.models.enums import OrderStatus, PaymentMode, database_enum
 
 class Order(Base):
     __tablename__ = "orders"
+    delivery_address: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     buyer_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("buyers.user_id", ondelete="CASCADE"), nullable=False, index=True)

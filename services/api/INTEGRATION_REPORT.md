@@ -1,5 +1,31 @@
 # KrishiLink frontend-first integration report
 
+## Core logistics continuation from `1e6253a8d03f7d8cc048d10a6cf15ea82aa92553`
+
+| Workflow | Result |
+| --- | --- |
+| Buyer catalog, checkout and persisted orders | Browser verified. The adapter uses live checkout, history and detail DTOs. Checkout stores the address, charges the current published quote in the order total, schedules the next available date in IST and creates a pending payment record. It does not collect payment, allocate future stock or dispatch unpaid orders. The order ID and `PLACED` status persist after reload. |
+| Buyer tracking | TestClient verifies persisted status and real driver telemetry. Live page integration remains blocked by protected synthetic fallbacks and the absence of a durable secure handover-code presentation. |
+| Farmer harvest and pickup | Browser verified harvest submission and reload. TestClient verifies eligible listing assignment, unauthorized denial, driver acknowledgement/start, arrival, confirmed pickup receipt, and pickup completion. Driver and dispatch screens remain unverified. |
+| Hub grades and settlements | TestClient verifies mismatched grade weights are rejected and settlement uses the reconciled quantities. Saleable stock excludes rejected kilograms. The browser displayed a reconciled farmer settlement calculated through the real API using seeded receipt evidence. Payout remains pending through the native approval path. |
+| Transfers | Browser verified approval and reload. Native tests verify assignment to an actual compatible trip, measured dispatch, destination arrival, measured receipt, duplicate protection and stock ledger entries. The browser transfer controls still lack trip and measurement inputs. |
+
+### Final checks
+
+- `python -m pytest -q --tb=short` passed **66 tests**, with 10 deprecation warnings. `app.openapi()` generated **87 paths**.
+- `node_modules/.bin/tsc.cmd --noEmit` and Vite live and demo production builds passed. The standalone temporary checkout kept Vite separated from the conflicted parent checkout.
+- `node services/api/tests/frontend_smoke.mjs live` exercised real FastAPI requests on a dedicated demo SQLite database. Admin pickup assignment, driver arrival/completion, grade weigh-in, transfer dispatch and transfer receipt were tested through native APIs or services and were not browser-driven.
+- `node services/api/tests/frontend_smoke.mjs screenshots` captured both viewport sizes. All 12 demo screenshot pairs against `origin/2branch` matched pixel-for-pixel. The protected path comparison and `git diff --check` passed.
+
+### Changed files
+
+- Frontend changes are confined to `src/lib/api/index.ts`.
+- API model and migration changes are in `app/models/order.py` and `alembic/versions/0005_order_address.py`.
+- Routes are in `app/routers/{driver,hubs,orders,transfers}.py`. Request/response schemas are in `app/schemas/{order,transfer}.py`.
+- Business rules are in `app/services/{order_service,trip_service,transfer_service,settlement_service}.py`.
+- Verification changes are in `tests/frontend_smoke.mjs` and `tests/test_{driver_dispatch,e2e_integration,frontend_contract,operations,order_concurrency}.py`.
+- The frontend audit and database requirements list the exact protected approval points and migration prerequisites. The teammate-owned `database/` tree remains unchanged.
+
 ## Continuation from `1dbca2eb727b385cddae2b0c280107acdbe1e609`
 
 | Scope | Result |

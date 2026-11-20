@@ -53,6 +53,7 @@ def test_safe_atomic_inventory_and_concurrency(db_session, seed_data):
         crop_id=tomato_id,
         kg_hub=50.0,
         kg_driver=50.0,
+        grade_a_kg=50.0,
         current_user=admin_user,
         db=db_session
     )

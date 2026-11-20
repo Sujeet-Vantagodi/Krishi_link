@@ -2,13 +2,13 @@ from datetime import date
 
 from sqlalchemy import select
 
-from app.models.enums import Grade, LedgerReason, TransferStatus, TripType, StopType, OrderStatus
+from app.models.enums import Grade, LedgerReason, TransferStatus, TripType, TripStatus, StopType, OrderStatus
 from app.models.listing import FarmerListing, PickupReceipt
 from app.models.payment import LedgerEntry, Payment, Settlement
 from app.models.stock import StockLedger
 from app.services import transfer_service
 from app.services.settlement_service import approve_settlement, calculate_settlements
-from app.services.trip_service import create_and_assign_trip
+from app.services.trip_service import create_and_assign_trip, transition_trip
 from app.services.order_service import create_buyer_order, confirm_order_delivery
 from app.schemas.order import OrderCreate, OrderItemCreate, DeliveryItemReport
 from app.core.exceptions import KrishiLinkException
@@ -31,10 +31,17 @@ def test_transfer_lifecycle_reconciles_both_hub_ledgers(db_session, seed_data):
     transfer = transfer_service.create_transfer(db_session, f["admin_user"], from_hub_id=f["village_hub"].id, to_hub_id=f["main_hub"].id, crop_id=f["tomato"].id, requested_kg=50)
     transfer = transfer_service.approve_transfer(db_session, transfer.id, f["admin_user"])
     trip = create_and_assign_trip(db_session, admin_user_id=f["admin_user"].id, driver_user_id=f["driver_user"].id, vehicle_id=f["vehicle"].id, trip_type=TripType.TRANSFER, origin_hub_id=f["village_hub"].id, dest_hub_id=f["main_hub"].id, stops_data=[{"type": StopType.HUB.value, "hub_id": str(f["main_hub"].id)}])
+    transfer = transfer_service.assign_transfer(db_session, transfer.id, trip.id)
+    assert transfer.status == TransferStatus.ASSIGNED
+    assert transfer.trip_id == trip.id
     transfer = transfer_service.dispatch_transfer(db_session, transfer.id, trip.id, 48, f["admin_user"])
     assert transfer.status == TransferStatus.IN_TRANSIT
     with pytest.raises(ConflictException):
         transfer_service.dispatch_transfer(db_session, transfer.id, trip.id, 48, f["admin_user"])
+    with pytest.raises(ConflictException):
+        transfer_service.receive_transfer(db_session, transfer.id, 46, f["hub_staff_user"])
+    for status in (TripStatus.ACKNOWLEDGED, TripStatus.STARTED, TripStatus.AT_HUB):
+        transition_trip(db_session, trip.id, status, f["driver_user"])
     transfer = transfer_service.receive_transfer(db_session, transfer.id, 46, f["hub_staff_user"])
     assert transfer.status == TransferStatus.RECEIVED
     with pytest.raises(ConflictException):
@@ -55,10 +62,18 @@ def test_settlement_is_verified_and_payout_remains_pending(db_session, seed_data
     db_session.add(PickupReceipt(trip_stop_id=stop.id, listing_id=listing.id, crop_id=f["tomato"].id, kg_received=5, grade=Grade.REJECT, farmer_confirmed=True))
     db_session.commit()
 
+    assert calculate_settlements(db_session, today) == []
+    from app.models.trip import HubReceipt
+    db_session.add(HubReceipt(
+        trip_id=trip.id, hub_id=f["main_hub"].id, crop_id=f["tomato"].id,
+        kg_driver=15, kg_hub=15, grade_a_kg=8, grade_b_kg=0, reject_kg=7,
+    ))
+    db_session.commit()
+
     settlement, = calculate_settlements(db_session, today)
-    assert float(settlement.accepted_kg) == 10
-    assert settlement.gross == 26000
-    assert settlement.net == 23920
+    assert float(settlement.accepted_kg) == 8
+    assert settlement.gross == 20800
+    assert settlement.net == 19136
     approve_settlement(db_session, settlement.id, f["admin_user"])
     payment = db_session.scalar(select(Payment).where(Payment.settlement_id == settlement.id))
     assert payment.status.value == "PENDING"

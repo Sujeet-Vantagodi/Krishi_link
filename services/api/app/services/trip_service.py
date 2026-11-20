@@ -15,12 +15,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.enums import (
-    TripStatus, StopStatus, StopType, LedgerReason, Grade, UserRole, OrderStatus, TripType
+    TripStatus, StopStatus, StopType, LedgerReason, Grade, UserRole, OrderStatus, TripType, ListingStatus
 )
 from app.models.trip import Trip, TripStop, LocationPing, HubReceipt
 from app.models.listing import FarmerListing, PickupReceipt
 from app.models.stock import StockLedger, HubStockStatus
-from app.models.user import Driver, Vehicle, User
+from app.models.user import Driver, Farmer, Vehicle, User
 from app.models.hub import Hub
 from app.models.order import Order, OrderItem
 from app.core.exceptions import (
@@ -228,11 +228,27 @@ def create_and_assign_trip(
             location=stop_def.get("location"),
             eta=stop_def.get("eta"),
         )
+        if stop.listing_id is not None:
+            listing = db.query(FarmerListing).filter_by(id=stop.listing_id).with_for_update().first()
+            if not listing:
+                raise NotFoundException("Farmer listing", stop.listing_id)
+            if stop.type != StopType.PICKUP or listing.status != ListingStatus.ELIGIBLE:
+                raise ConflictException("Only eligible listings may be assigned to pickup stops")
+            if stop.farmer_id is not None and stop.farmer_id != listing.farmer_id:
+                raise BusinessRuleException("Pickup farmer does not match the assigned listing")
+            stop.farmer_id = listing.farmer_id
+            farmer = db.get(Farmer, listing.farmer_id)
+            if farmer and farmer.location:
+                stop.location = farmer.location
+            listing.status = ListingStatus.SCHEDULED
+            db.flush()
         db.add(stop)
         if stop.buyer_order_id is not None:
             order = db.query(Order).filter(Order.id == stop.buyer_order_id).with_for_update().first()
             if not order:
                 raise NotFoundException("Order", stop.buyer_order_id)
+            if order.delivery_address is not None and order.status == OrderStatus.PLACED:
+                raise ConflictException("Checkout order must be paid and allocated before dispatch")
             if order.status not in (OrderStatus.PLACED, OrderStatus.CONFIRMED, OrderStatus.ASSIGNED):
                 raise ConflictException(f"Order {order.id} cannot be dispatched from status {order.status.value}")
             order.status = OrderStatus.ASSIGNED
@@ -345,13 +361,20 @@ def record_receipt(
         PickupReceipt.client_event_id == client_event_id
     ).first()
     if existing:
+        if existing.trip_stop_id != stop_id:
+            raise ConflictException("Receipt event belongs to another stop")
         return existing, True
+
+    if trip.status != TripStatus.STARTED or stop.status not in (StopStatus.ARRIVED, StopStatus.IN_PROGRESS):
+        raise BusinessRuleException("Pickup receipts require an active trip and an arrived stop")
 
     # Advance stop to IN_PROGRESS if still ARRIVED
     if stop.status == StopStatus.ARRIVED:
         stop.status = StopStatus.IN_PROGRESS
 
     effective_listing_id = listing_id or stop.listing_id
+    if stop.listing_id and effective_listing_id != stop.listing_id:
+        raise BusinessRuleException("Pickup receipt must use the assigned listing")
     if effective_listing_id:
         listing = db.query(FarmerListing).filter(FarmerListing.id == effective_listing_id).first()
         if not listing or listing.farmer_id != stop.farmer_id or listing.crop_id != crop_id:
@@ -375,6 +398,8 @@ def record_receipt(
         db.rollback()
         existing = db.query(PickupReceipt).filter(PickupReceipt.client_event_id == client_event_id).first()
         if existing:
+            if existing.trip_stop_id != stop_id:
+                raise ConflictException("Receipt event belongs to another stop")
             return existing, True
         raise
     db.refresh(receipt)
@@ -385,9 +410,15 @@ def complete_stop(db: Session, trip_id: uuid.UUID, stop_id: uuid.UUID, actor: Us
     trip = get_trip_or_404(db, trip_id)
     _assert_trip_actor(trip, actor)
     stop = get_stop_or_404(db, trip_id, stop_id)
+    if trip.status != TripStatus.STARTED or stop.type != StopType.PICKUP:
+        raise BusinessRuleException("Only a pickup stop on an active trip can be completed here")
+    if not stop.receipts or any(not item.farmer_confirmed or item.grade is None for item in stop.receipts):
+        raise BusinessRuleException("Pickup completion requires confirmed, graded receipt lines")
     _assert_stop_transition(stop, StopStatus.COMPLETED)
     stop.status = StopStatus.COMPLETED
     stop.completed_at = _now_utc()
+    if stop.listing_id:
+        db.get(FarmerListing, stop.listing_id).status = ListingStatus.COLLECTED
     db.commit()
     db.refresh(stop)
     return stop
@@ -456,6 +487,7 @@ def hub_receive(
     if trip.dest_hub_id is not None and trip.dest_hub_id != hub_id:
         raise BusinessRuleException("Hub receipt must be recorded at the trip's assigned destination")
 
+    accepted_kg = verified_saleable_weight(kg_hub, grade_a_kg, grade_b_kg, reject_kg)
     lock_hub_inventory(db, hub_id)
     # Duplicate guard: same trip+crop
     already = db.query(HubReceipt).filter(
@@ -479,12 +511,13 @@ def hub_receive(
         recorded_by=actor.id,
     )
     db.add(receipt)
+    db.flush()
 
     # Credit stock ledger
     ledger = StockLedger(
         hub_id=hub_id,
         crop_id=crop_id,
-        delta_kg=float(kg_hub),
+        delta_kg=accepted_kg,
         reason=LedgerReason.PICKUP,
         ref_type="hub_receipt",
         ref_id=receipt.id,
@@ -494,6 +527,16 @@ def hub_receive(
     db.commit()
     db.refresh(receipt)
     return receipt
+
+
+def verified_saleable_weight(total: float, grade_a: float, grade_b: float, rejected: float) -> float:
+    from math import isclose, isfinite
+
+    if not all(isfinite(value) and value >= 0 for value in (total, grade_a, grade_b, rejected)):
+        raise BusinessRuleException("Receipt weights must be finite and non-negative")
+    if total <= 0 or not isclose(total, grade_a + grade_b + rejected, rel_tol=0, abs_tol=0.0005):
+        raise BusinessRuleException("Grade A, grade B and rejected weights must add up to the measured total")
+    return grade_a + grade_b
 
 
 # ── Location Tracking ─────────────────────────────────────────────────────────

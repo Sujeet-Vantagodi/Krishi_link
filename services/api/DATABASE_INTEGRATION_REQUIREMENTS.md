@@ -1,5 +1,12 @@
 # Database integration requirements
 
+## Core logistics continuation
+
+- API migration `0005_order_address` adds nullable `orders.delivery_address`. New buyer checkout stores the address snapshot. Legacy values remain null until a reliable source is available. Delivery geocoding and the verified payment-provider callback are still separate dependencies.
+- Only accepted A/B kilograms now enter saleable hub stock. Historical ledger entries are preserved. The database team should review historical hub receipts with rejects before production availability is computed from a mixed ledger.
+- Settlement reconciliation uses the hub split for one confirmed farmer where accepted weight is within the verified pickup total. For mixed loads it uses per-farmer pickup allocations only when both grade totals match. Discrepancies stay out of settlement calculations until per-farmer reweigh evidence or an approved allocation policy exists. Review prior DRAFT rows before payment approval.
+- Transfer assignment uses the existing transfer-to-trip relationship. Assignment, sent weight and received weight come from persisted inputs. No changes to the teammate-owned schema or data were made. PostgreSQL migration application remains unverified.
+
 ## Continuation migrations
 
 - API-owned Alembic revision `0003_password_credentials` adds a one-to-one table referencing `users.id`. It stores a salted scrypt verifier and optional contact email. Existing users have no password until provisioned. The API never reads or imports the teammate credential store. Compare normalized phone identities and UUID ownership before migrating any credentials.

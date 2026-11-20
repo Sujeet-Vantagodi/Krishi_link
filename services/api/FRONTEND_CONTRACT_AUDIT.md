@@ -1,5 +1,17 @@
 # Frontend contract audit
 
+## Core logistics continuation from `1e6253a`
+
+| Operation | Live contract | Remaining boundary |
+| --- | --- | --- |
+| Buyer checkout | `POST /orders/checkout` accepts the existing slot, address, payment choice and crop lines. Server schedules the next eligible day in IST and uses the current published quote. Response returns the persisted address, slot, price lines, order status and pending payment state. | The fixed date in `src/pages/buyer/Checkout.tsx:27` is demo data and is omitted by the live adapter. The existing tomorrow wording can be wrong after cutoff. Approval is needed to show the returned date. Credit and external payment confirmation remain unavailable. |
+| Buyer order history and detail | `GET /orders/history` and `GET /orders/history/{id}` enforce buyer ownership. Legacy rows without an address show `Address not recorded`. | The TypeScript order type requires coordinates. Checkout/history receive null for an ungeocoded address and do not use coordinates. |
+| Buyer tracking | Native `GET /orders/{id}/tracking` uses persisted status and telemetry. | Approve nonvisual changes to `src/pages/buyer/OrderTracking.tsx:36,37,105,108,129` and its demo realtime subscription to handle missing telemetry, driver, ETA and handover code honestly. |
+| Admin pickup assignment | Native `POST /admin/assign` checks and reserves eligible listing IDs. | `src/pages/admin/Dispatch.tsx:37-98` builds stops using hardcoded coordinates and a hub alias. Approve changes to use actual listing and destination data before wiring the dispatch page. |
+| Pickup evidence and completion | Arrival, grade receipt, and `POST /trips/{id}/stops/{stop_id}/complete-pickup` enforce role, active trip, arrival and confirmed grade lines. | `src/features/trips/hooks.ts:73-78` drops arrival coordinates. `src/pages/driver/DriverTrip.tsx` uses a planned stop as fallback vehicle location. `src/pages/driver/DriverStop.tsx:40` submits a batch with a confirmation method. Approve wiring for real arrival/telemetry and receipt evidence without changing layout. |
+| Hub and transfers | Hub weigh-in validates grades. Native transfer assignment uses persisted trip/driver/vehicle, dispatch debits measured sent weight, and receipt credits measured received weight at the destination. | `src/pages/admin/Transfers.tsx:24-33` sends only target statuses. Approval is needed for collecting the actual trip and both weights. The protected hub views also lack an intake control for the measured grade breakdown. |
+| Settlement | Calculation requires matching pickup and hub receipts, grade totals and published pricing. Unattributable differences are withheld. | No external payout execution occurred. Legacy draft settlement review remains necessary. |
+
 ## Continuation from `1dbca2e`
 
 | UI operation | Live request and result | Follow-up |

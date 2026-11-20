@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.core.dependencies import get_current_user, require_roles
+from app.core.exceptions import ForbiddenException
 from app.models.user import User
 from app.models.hub import HubStaff
 from app.models.enums import UserRole, TripStatus
@@ -136,6 +137,8 @@ def hub_receive(
         raise ForbiddenException("Hub staff may only receive stock at an assigned hub")
     if not trip or trip.dest_hub_id != hub_id:
         raise ForbiddenException("Hub must match the assigned trip destination")
+    if trip.status != TripStatus.AT_HUB:
+        raise ForbiddenException("Trip must reach the assigned hub before weigh-in")
     receipt = trip_service.hub_receive(
         db,
         trip_id=trip_id,
@@ -253,6 +256,16 @@ def receipt_stop(
         recorded_at=receipt.recorded_at,
         duplicate=is_dup,
     )
+
+
+@router.post("/trips/{trip_id}/stops/{stop_id}/complete-pickup", response_model=TripStopOut)
+def complete_pickup(
+    trip_id: uuid.UUID,
+    stop_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return _stop_to_out(trip_service.complete_stop(db, trip_id, stop_id, current_user))
 
 
 @router.post("/trips/{trip_id}/stops/{stop_id}/deliver", response_model=TripStopOut)

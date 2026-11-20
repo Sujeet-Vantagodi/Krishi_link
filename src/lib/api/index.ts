@@ -184,6 +184,21 @@ export async function getTodayPrices(): Promise<{ crop_id: string; price: any }[
 
 // ==================== 2. BUYER ENDPOINTS ====================
 
+type BuyerOrderRecord = Omit<Order, 'location'> & {
+  location: Order['location'] | null;
+  delivery_code?: string | null;
+};
+
+function presentBuyerOrder(record: BuyerOrderRecord, crops: Crop[]): Order {
+  // Checkout and history do not use map coordinates. Tracking stays disabled
+  // until the screen can represent an order with no verified coordinates.
+  return {
+    ...record,
+    delivery_otp: record.delivery_code ?? undefined,
+    items: record.items.map((item) => ({ ...item, crop: crops.find((crop) => crop.id === item.crop_id) })),
+  } as Order;
+}
+
 export async function createOrder(data: {
   delivery_date: string;
   slot: string;
@@ -192,7 +207,16 @@ export async function createOrder(data: {
   address?: string;
   buyer_id?: string;
 }): Promise<Order> {
-  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
+  if (!API_DEMO_MODE) {
+    const crops = await getCrops();
+    const record = await requestApi<BuyerOrderRecord>('/orders/checkout', 'POST', {
+      slot: data.slot,
+      payment_mode: data.payment_mode === 'UPI' ? 'PREPAID' : data.payment_mode,
+      items: data.items,
+      address: data.address,
+    });
+    return presentBuyerOrder(record, crops);
+  }
   await delay(350);
 
   let totalPaise = 0;
@@ -259,7 +283,14 @@ export async function createOrder(data: {
 }
 
 export async function getOrders(status?: string): Promise<Order[]> {
-  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
+  if (!API_DEMO_MODE) {
+    const query = status ? `?status=${encodeURIComponent(status)}` : '';
+    const [result, crops] = await Promise.all([
+      requestApi<{ items: BuyerOrderRecord[] }>(`/orders/history${query}`),
+      getCrops(),
+    ]);
+    return result.items.map((order) => presentBuyerOrder(order, crops));
+  }
   await delay(180);
   if (status) {
     return mockDb.orders.filter((o) => o.status === status);
@@ -268,7 +299,13 @@ export async function getOrders(status?: string): Promise<Order[]> {
 }
 
 export async function getOrderById(id: string): Promise<Order> {
-  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
+  if (!API_DEMO_MODE) {
+    const [order, crops] = await Promise.all([
+      requestApi<BuyerOrderRecord>(`/orders/history/${encodeURIComponent(id)}`),
+      getCrops(),
+    ]);
+    return presentBuyerOrder(order, crops);
+  }
   await delay(120);
   const order = mockDb.orders.find((o) => o.id === id);
   if (!order) throw new ApiError('NOT_FOUND', 'Order not found');
