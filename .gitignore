@@ -1,0 +1,32 @@
+# Dependencies & Build
+node_modules/
+dist/
+build/
+
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+env/
+venv/
+ENV/
+
+# OS Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# SQLite journals
+*.db-journal
+*.db-wal
+*.db-shm
