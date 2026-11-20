@@ -244,12 +244,18 @@ def create_and_assign_trip(
 
 # ── Trip Lifecycle ────────────────────────────────────────────────────────────
 
+def _assert_trip_actor(trip: Trip, actor: User) -> None:
+    if actor.role == UserRole.DRIVER:
+        assert_driver_owns_trip(trip, actor.id)
+    elif actor.role not in (UserRole.ADMIN, UserRole.SUPER_ADMIN):
+        raise ForbiddenException("Only the assigned driver or an administrator may operate this trip")
+
+
 def transition_trip(db: Session, trip_id: uuid.UUID, to: TripStatus, actor: User) -> Trip:
     trip = get_trip_or_404(db, trip_id)
 
     # Drivers can only change their own trips; admins can change any
-    if actor.role == UserRole.DRIVER:
-        assert_driver_owns_trip(trip, actor.id)
+    _assert_trip_actor(trip, actor)
 
     _assert_trip_transition(trip, to)
     trip.status = to
@@ -283,8 +289,7 @@ def arrive_stop(
     override_reason: Optional[str] = None,
 ) -> TripStop:
     trip = get_trip_or_404(db, trip_id)
-    if actor.role == UserRole.DRIVER:
-        assert_driver_owns_trip(trip, actor.id)
+    _assert_trip_actor(trip, actor)
 
     stop = get_stop_or_404(db, trip_id, stop_id)
     _assert_stop_transition(stop, StopStatus.ARRIVED)
@@ -329,8 +334,7 @@ def record_receipt(
     Does NOT credit hub inventory — that happens on hub_receive.
     """
     trip = get_trip_or_404(db, trip_id)
-    if actor.role == UserRole.DRIVER:
-        assert_driver_owns_trip(trip, actor.id)
+    _assert_trip_actor(trip, actor)
 
     stop = get_stop_or_404(db, trip_id, stop_id)
     if stop.type not in (StopType.PICKUP,):
@@ -379,8 +383,7 @@ def record_receipt(
 
 def complete_stop(db: Session, trip_id: uuid.UUID, stop_id: uuid.UUID, actor: User) -> TripStop:
     trip = get_trip_or_404(db, trip_id)
-    if actor.role == UserRole.DRIVER:
-        assert_driver_owns_trip(trip, actor.id)
+    _assert_trip_actor(trip, actor)
     stop = get_stop_or_404(db, trip_id, stop_id)
     _assert_stop_transition(stop, StopStatus.COMPLETED)
     stop.status = StopStatus.COMPLETED
@@ -399,8 +402,7 @@ def deliver_stop(
     actor: User,
 ) -> TripStop:
     trip = get_trip_or_404(db, trip_id)
-    if actor.role == UserRole.DRIVER:
-        assert_driver_owns_trip(trip, actor.id)
+    _assert_trip_actor(trip, actor)
     stop = get_stop_or_404(db, trip_id, stop_id)
     if stop.type != StopType.DELIVERY:
         raise BusinessRuleException("deliver can only be called on DELIVERY stops")
@@ -416,8 +418,7 @@ def deliver_stop(
 
 def skip_stop(db: Session, trip_id: uuid.UUID, stop_id: uuid.UUID, reason: str, actor: User) -> TripStop:
     trip = get_trip_or_404(db, trip_id)
-    if actor.role == UserRole.DRIVER:
-        assert_driver_owns_trip(trip, actor.id)
+    _assert_trip_actor(trip, actor)
     stop = get_stop_or_404(db, trip_id, stop_id)
     if stop.status == StopStatus.COMPLETED:
         raise BusinessRuleException("Cannot skip an already completed stop")

@@ -14,6 +14,7 @@ from app.models.crop import Crop
 from app.models.pricing import PublishedPrice
 from app.models.enums import UserRole, HubType, StockStatus
 from app.core.security import create_access_token
+from app.config import settings
 
 TEST_DATABASE_URL = "sqlite+pysqlite:///:memory:"
 
@@ -23,6 +24,11 @@ engine = create_engine(
     poolclass=StaticPool
 )
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+@pytest.fixture(autouse=True)
+def enable_development_otp_for_test(monkeypatch):
+    monkeypatch.setattr(settings, "MOCK_OTP", True)
 
 
 @pytest.fixture(autouse=True)

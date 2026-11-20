@@ -41,6 +41,12 @@ def _safe_role(requested_role: Optional[UserRole]) -> UserRole:
 
 
 def request_otp(phone: str, role: Optional[UserRole] = UserRole.BUYER) -> Tuple[str, str]:
+    if not settings.is_development or not settings.MOCK_OTP:
+        raise KrishiLinkException(
+            status_code=503,
+            code="OTP_DELIVERY_UNAVAILABLE",
+            message="SMS delivery is unavailable.",
+        )
     phone = phone.strip()
     now = datetime.now(timezone.utc)
 
@@ -60,7 +66,7 @@ def request_otp(phone: str, role: Optional[UserRole] = UserRole.BUYER) -> Tuple[
     _otp_rate[phone] = now
 
     request_id = f"req_{uuid.uuid4().hex[:16]}"
-    otp = settings.MOCK_OTP_CODE if settings.MOCK_OTP else _generate_otp()
+    otp = settings.MOCK_OTP_CODE
     expires_at = now + timedelta(seconds=settings.OTP_EXPIRY_SECONDS)
 
     # Strip privileged roles before storing
@@ -77,12 +83,9 @@ def request_otp(phone: str, role: Optional[UserRole] = UserRole.BUYER) -> Tuple[
     return request_id, otp
 
 
-def _generate_otp() -> str:
-    import secrets
-    return str(secrets.randbelow(900000) + 100000)
-
-
 def verify_otp(db: Session, request_id: str, otp: str) -> Tuple[str, str, User, bool]:
+    if not settings.is_development or not settings.MOCK_OTP:
+        raise UnauthenticatedException("Development OTP verification is unavailable")
     record = _otp_store.get(request_id)
     now = datetime.now(timezone.utc)
 
@@ -160,6 +163,8 @@ def verify_otp(db: Session, request_id: str, otp: str) -> Tuple[str, str, User, 
         db.commit()
         db.refresh(user)
     else:
+        if not user.is_active:
+            raise UnauthenticatedException("User inactive or not found")
         # NEVER update role from API — existing role is authoritative
         user.last_login_at = now
         db.commit()

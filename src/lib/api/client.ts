@@ -27,6 +27,7 @@ const resolveWsBaseUrl = () => {
 
 export const API_BASE_URL = resolveApiBaseUrl();
 export const WS_BASE_URL = resolveWsBaseUrl();
+export const API_DEMO_MODE = import.meta.env.VITE_API_DEMO_MODE === 'true';
 
 export interface ApiResponse<T> {
   data: T;
@@ -43,6 +44,37 @@ export class ApiError extends Error {
     this.code = code;
     this.details = details;
   }
+}
+
+export async function requestApi<T>(
+  path: string,
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE' = 'GET',
+  body?: unknown,
+): Promise<T> {
+  const token = localStorage.getItem('krishilink_token');
+  const headers = new Headers({ Accept: 'application/json' });
+  if (token && !token.startsWith('mock_jwt')) headers.set('Authorization', `Bearer ${token}`);
+  if (body !== undefined) headers.set('Content-Type', 'application/json');
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw new ApiError('NETWORK_ERROR', 'Unable to reach the KrishiLink API');
+  }
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    const detail = error?.error ?? error?.detail?.error ?? error?.detail;
+    throw new ApiError(
+      detail?.code ?? `HTTP_${response.status}`,
+      detail?.message ?? (typeof detail === 'string' ? detail : response.statusText),
+      detail?.details,
+    );
+  }
+  return response.json();
 }
 
 // Simulates network latency

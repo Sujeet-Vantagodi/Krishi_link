@@ -1,18 +1,35 @@
 import uuid
 from datetime import date, datetime
 from typing import Optional, List
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 from app.models.enums import ListingStatus
 
 
 class CropThresholdItem(BaseModel):
     crop_id: uuid.UUID
-    min_kg: float = Field(..., gt=0)
+    min_kg: float = Field(..., gt=0, le=999999.99)
 
 
 class FarmerThresholdUpdate(BaseModel):
-    default_min_kg: float = Field(..., gt=0, description="Default farmer threshold in kg")
-    per_crop: Optional[List[CropThresholdItem]] = Field(default=[], description="Per-crop overrides")
+    default_min_kg: float = Field(..., gt=0, le=999999.99, description="Default farmer threshold in kg")
+    per_crop: Optional[List[CropThresholdItem]] = Field(default=None, description="Per-crop overrides")
+
+    @field_validator("per_crop")
+    @classmethod
+    def reject_duplicate_crops(cls, overrides):
+        if overrides is not None and len({item.crop_id for item in overrides}) != len(overrides):
+            raise ValueError("Each crop may have only one threshold")
+        return overrides
+
+
+class FarmerThresholdResponse(BaseModel):
+    default_min_kg: float
+    per_crop: List[CropThresholdItem]
+
+
+class FarmerThresholdUpdated(BaseModel):
+    message: str
+    default_min_kg: float
 
 
 class FarmerProfileUpdate(BaseModel):
@@ -74,3 +91,8 @@ class FarmerListingResponse(BaseModel):
     cutoff_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class FarmerListingsResponse(BaseModel):
+    items: list[FarmerListingResponse]
+    total: int

@@ -91,8 +91,8 @@ class DriverAvailableOut(BaseModel):
 # ─── Stop Actions ─────────────────────────────────────────────────────────────
 
 class ArriveStopIn(BaseModel):
-    lat: float
-    lng: float
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
     admin_override: bool = False
     override_reason: Optional[str] = None
 

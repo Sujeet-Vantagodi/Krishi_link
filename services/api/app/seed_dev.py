@@ -70,10 +70,17 @@ def seed() -> dict[str, str]:
         city_b = hub("Electronic City Distribution Hub", HubType.CITY, 12.8452, 77.6602, "Electronic City, Bengaluru", central.id)
 
         crops = []
-        for slug, en, kn, minimum in [("demo-tomato", "Tomato", "ಟೊಮೇಟೊ", 5), ("demo-onion", "Onion", "ಈರುಳ್ಳಿ", 10), ("demo-ragi", "Ragi", "ರಾಗಿ", 5)]:
+        for slug, en, kn, minimum, category, shelf_hours in [
+            ("demo-tomato", "Tomato", "ಟೊಮೇಟೊ", 5, "fruit_veg", 96),
+            ("demo-onion", "Onion", "ಈರುಳ್ಳಿ", 10, "roots", 336),
+            ("demo-ragi", "Ragi", "ರಾಗಿ", 5, "fruit_veg", 720),
+        ]:
             crop = db.scalar(select(Crop).where(Crop.slug == slug))
             if crop is None:
-                crop = Crop(slug=slug, name_en=en, name_kn=kn, category="fruit_veg", min_order_kg=1, default_min_kg=minimum, active=True)
+                crop = Crop(
+                    slug=slug, name_en=en, name_kn=kn, category=category,
+                    shelf_life_hours=shelf_hours, min_order_kg=1, default_min_kg=minimum, active=True,
+                )
                 db.add(crop)
                 db.flush()
             crops.append(crop)

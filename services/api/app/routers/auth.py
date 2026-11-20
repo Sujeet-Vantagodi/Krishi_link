@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.config import settings
@@ -16,6 +16,18 @@ from pathlib import Path
 from sqlalchemy.engine import make_url
 
 router = APIRouter(prefix="", tags=["Auth"])
+legacy_auth_router = APIRouter(tags=["Auth"])
+
+
+@legacy_auth_router.post("/api/auth/login", include_in_schema=False)
+@legacy_auth_router.post("/api/auth/register", include_in_schema=False)
+@router.post("/auth/login", include_in_schema=False)
+@router.post("/auth/register", include_in_schema=False)
+def password_auth_unavailable():
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="Password authentication is unavailable until the credential store is integrated.",
+    )
 
 DEMO_ACCOUNTS = {
     UserRole.FARMER: "+919999001001",
@@ -56,7 +68,7 @@ def api_request_otp(data: OtpRequest):
     req_id, otp = request_otp(data.phone, data.role)
     return OtpRequestResponse(
         request_id=req_id,
-        message=f"OTP sent to {data.phone}",
+        message="Development OTP generated",
         mock_otp=otp if settings.MOCK_OTP else None
     )
 
@@ -88,7 +100,7 @@ def api_refresh_token(data: RefreshTokenRequest, db: Session = Depends(get_db)):
 
 @router.post("/auth/logout")
 def api_logout(current_user: User = Depends(get_current_user)):
-    return {"message": "Logged out successfully"}
+    return {"message": "Discard tokens on the client. Issued tokens expire on their existing schedule."}
 
 
 @router.get("/me", response_model=UserResponse)

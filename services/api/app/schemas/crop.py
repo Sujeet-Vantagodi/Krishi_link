@@ -39,4 +39,19 @@ class CropPriceRange(BaseModel):
 
 class CropCatalogItem(CropResponse):
     price: Optional[CropPriceRange] = None
-    availability: StockStatus = StockStatus.SUFFICIENT
+    availability: StockStatus
+
+
+class CropCatalogResponse(BaseModel):
+    items: list[CropCatalogItem]
+    total: int
+
+
+class PublishedPriceItem(CropPriceRange):
+    crop_id: uuid.UUID
+    overridden: bool
+
+
+class TodayPricesResponse(BaseModel):
+    date: str
+    items: list[PublishedPriceItem]

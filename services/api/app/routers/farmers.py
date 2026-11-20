@@ -11,14 +11,15 @@ from app.models.trip import Trip, TripStop
 from app.models.listing import PickupReceipt
 from app.models.payment import Settlement
 from app.models.enums import UserRole, ListingStatus, TripStatus
+from app.schemas.settlement import SettlementResponse, SettlementsResponse
 from app.schemas.farmer import (
     FarmerProfileUpdate, FarmerProfileResponse,
-    FarmerThresholdUpdate, CropThresholdItem,
-    FarmerListingCreate, FarmerListingUpdate, FarmerListingResponse
+    FarmerThresholdUpdate, FarmerThresholdResponse, FarmerThresholdUpdated, CropThresholdItem,
+    FarmerListingCreate, FarmerListingUpdate, FarmerListingResponse, FarmerListingsResponse
 )
 from app.core.dependencies import require_roles
 from app.core.exceptions import NotFoundException, ForbiddenException, CutoffPassedException
-from app.services.listing_service import create_or_update_listing, check_cutoff_passed, get_applicable_threshold
+from app.services.listing_service import create_or_update_listing, check_cutoff_passed, get_applicable_threshold, listing_cutoff
 
 router = APIRouter(prefix="/farmers/me", tags=["Farmer"])
 
@@ -104,13 +105,15 @@ def update_farmer_profile(
     )
 
 
-@router.get("/threshold", response_model=dict)
+@router.get("/threshold", response_model=FarmerThresholdResponse)
 def get_thresholds(
     current_user: User = Depends(require_roles(UserRole.FARMER)),
     db: Session = Depends(get_db)
 ):
     farmer = db.query(Farmer).filter(Farmer.user_id == current_user.id).first()
-    default_min = float(farmer.default_min_kg) if farmer else 20.0
+    if farmer is None:
+        raise NotFoundException("Farmer profile", current_user.id)
+    default_min = float(farmer.default_min_kg)
     thresholds = db.query(FarmerCropThreshold).filter(FarmerCropThreshold.farmer_id == current_user.id).all()
 
     return {
@@ -119,22 +122,25 @@ def get_thresholds(
     }
 
 
-@router.put("/threshold", response_model=dict)
+@router.put("/threshold", response_model=FarmerThresholdUpdated)
 def update_thresholds(
     data: FarmerThresholdUpdate,
     current_user: User = Depends(require_roles(UserRole.FARMER)),
     db: Session = Depends(get_db)
 ):
-    farmer = db.query(Farmer).filter(Farmer.user_id == current_user.id).first()
+    farmer = db.query(Farmer).filter(Farmer.user_id == current_user.id).with_for_update().first()
     if not farmer:
         farmer = Farmer(user_id=current_user.id)
         db.add(farmer)
 
     farmer.default_min_kg = data.default_min_kg
 
-    # Delete existing crop thresholds and insert new overrides
-    db.query(FarmerCropThreshold).filter(FarmerCropThreshold.farmer_id == current_user.id).delete()
-    if data.per_crop:
+    if data.per_crop is not None:
+        crop_ids = {item.crop_id for item in data.per_crop}
+        found_ids = {crop_id for (crop_id,) in db.query(Crop.id).filter(Crop.id.in_(crop_ids)).all()}
+        if missing_ids := crop_ids - found_ids:
+            raise NotFoundException("Crop", next(iter(missing_ids)))
+        db.query(FarmerCropThreshold).filter(FarmerCropThreshold.farmer_id == current_user.id).delete()
         for item in data.per_crop:
             t = FarmerCropThreshold(
                 farmer_id=current_user.id,
@@ -179,11 +185,12 @@ def submit_listing(
         status=listing.status,
         min_kg_applied=float(listing.min_kg_applied) if listing.min_kg_applied else None,
         created_at=listing.created_at,
-        message_kn=msg_kn
+        message_kn=msg_kn,
+        cutoff_at=listing_cutoff(listing.listing_date),
     )
 
 
-@router.get("/listings", response_model=dict)
+@router.get("/listings", response_model=FarmerListingsResponse)
 def get_farmer_listings(
     date: Optional[date] = Query(None),
     current_user: User = Depends(require_roles(UserRole.FARMER)),
@@ -208,7 +215,8 @@ def get_farmer_listings(
             "ready_by": l.ready_by,
             "status": l.status,
             "min_kg_applied": float(l.min_kg_applied) if l.min_kg_applied else None,
-            "created_at": l.created_at
+            "created_at": l.created_at,
+            "cutoff_at": listing_cutoff(l.listing_date),
         })
 
     return {"items": items, "total": len(items)}
@@ -227,6 +235,9 @@ def edit_listing(
     ).first()
     if not listing:
         raise NotFoundException("Listing", id)
+
+    if listing.status not in (ListingStatus.DRAFT, ListingStatus.ELIGIBLE, ListingStatus.INELIGIBLE):
+        raise ForbiddenException(f"Cannot edit listing in status '{listing.status.value}'")
 
     if check_cutoff_passed(listing.listing_date):
         raise CutoffPassedException(cutoff_time="D-1 18:00 IST", action="editing listing")
@@ -270,6 +281,9 @@ def cancel_listing(
     if not listing:
         raise NotFoundException("Listing", id)
 
+    if listing.status not in (ListingStatus.DRAFT, ListingStatus.ELIGIBLE, ListingStatus.INELIGIBLE):
+        raise ForbiddenException(f"Cannot cancel listing in status '{listing.status.value}'")
+
     if check_cutoff_passed(listing.listing_date):
         raise CutoffPassedException(cutoff_time="D-1 18:00 IST", action="cancelling listing")
 
@@ -301,7 +315,7 @@ def get_current_pickup(
         "trip_id": trip.id,
         "stop_id": stop.id,
         "trip_status": trip.status,
-        "location": stop.location or loc,
+        "location": stop.location,
         "listing_id": stop.listing_id,
         "driver": {"name": driver.name if driver else "Assigned Driver", "phone": driver.phone if driver else ""},
         "vehicle": {"reg_no": vehicle.reg_no if vehicle else "", "type": vehicle.type if vehicle else ""},
@@ -335,6 +349,23 @@ def get_farmer_payments(
         ],
         "total": len(settlements)
     }
+
+
+@router.get("/settlements", response_model=SettlementsResponse)
+def get_farmer_settlement_statements(
+    current_user: User = Depends(require_roles(UserRole.FARMER)),
+    db: Session = Depends(get_db),
+):
+    settlements = (
+        db.query(Settlement)
+        .filter(Settlement.farmer_id == current_user.id)
+        .order_by(Settlement.settle_date.desc())
+        .all()
+    )
+    return SettlementsResponse(
+        items=[SettlementResponse.from_record(item) for item in settlements],
+        total=len(settlements),
+    )
 
 
 @router.get("/receipts", response_model=dict)

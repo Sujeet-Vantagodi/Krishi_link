@@ -13,7 +13,7 @@ from app.models.enums import TripStatus, TripType
 from app.models.stock import HubStockStatus, StockLedger
 from app.models.enums import UserRole, StockStatus, LedgerReason
 from app.schemas.hub import (
-    HubCreate, HubResponse, HubStockStatusResponse,
+    HubCreate, HubListResponse, HubResponse, HubStockStatusResponse,
     HubStockStatusUpdate, StockMatrixResponse, StockAdjustmentCreate
 )
 from app.core.dependencies import require_roles, get_current_user
@@ -56,7 +56,7 @@ def api_hub_stock_ledger(id: uuid.UUID, current_user: User = Depends(require_rol
     return {"items": [{"id": row.id, "crop_id": str(row.crop_id), "delta_kg": float(row.delta_kg), "reason": row.reason.value, "ref_type": row.ref_type, "created_at": row.created_at} for row in rows], "total": len(rows)}
 
 
-@router.get("", response_model=dict)
+@router.get("", response_model=HubListResponse)
 def api_list_hubs(db: Session = Depends(get_db)):
     hubs = db.query(Hub).filter(Hub.active == True).order_by(Hub.name).all()
     items = []
@@ -70,7 +70,7 @@ def api_list_hubs(db: Session = Depends(get_db)):
             "lat": loc.get("lat"),
             "lng": loc.get("lng"),
             "address": h.address,
-            "capacity_kg": float(h.capacity_kg) if h.capacity_kg else None,
+            "capacity_kg": float(h.capacity_kg) if h.capacity_kg is not None else None,
             "has_cold_room": h.has_cold_room,
             "active": h.active
         })
@@ -105,7 +105,7 @@ def api_create_hub(
         lat=loc.get("lat"),
         lng=loc.get("lng"),
         address=hub.address,
-        capacity_kg=float(hub.capacity_kg) if hub.capacity_kg else None,
+        capacity_kg=float(hub.capacity_kg) if hub.capacity_kg is not None else None,
         has_cold_room=hub.has_cold_room,
         active=hub.active
     )
@@ -116,8 +116,12 @@ def api_get_stock_matrix(
     current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.HUB_STAFF)),
     db: Session = Depends(get_db)
 ):
-    matrix_data = get_stock_matrix_data(db)
-    return matrix_data
+    hub_ids = None
+    if current_user.role == UserRole.HUB_STAFF:
+        hub_ids = {
+            hub_id for (hub_id,) in db.query(HubStaff.hub_id).filter(HubStaff.user_id == current_user.id).all()
+        }
+    return get_stock_matrix_data(db, hub_ids)
 
 
 @router.get("/{id}", response_model=HubResponse)
@@ -172,6 +176,8 @@ def api_update_stock_button(
     current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.HUB_STAFF)),
     db: Session = Depends(get_db)
 ):
+    if current_user.role == UserRole.HUB_STAFF and not db.get(HubStaff, (current_user.id, id)):
+        raise ForbiddenException("Hub staff may only update an assigned hub")
     record = update_hub_stock_status(
         db=db,
         hub_id=id,
