@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     ]
 
     # Telecom / OTP
-    MOCK_OTP: bool = True
+    MOCK_OTP: bool = False
     MOCK_OTP_CODE: str = "123456"
     OTP_EXPIRY_SECONDS: int = 300
     OTP_MAX_ATTEMPTS: int = 5          # per request_id before lockout

@@ -1,3 +1,4 @@
+import { API_DEMO_MODE } from '../../lib/api/client';
 import React, { useState, useEffect } from 'react';
 import { Crop, Grade } from '../../types';
 import { Button } from '../ui/button';
@@ -39,7 +40,7 @@ export const ReceiptForm: React.FC<ReceiptFormProps> = ({
   const isKn = i18n.language === 'kn';
 
   const [lines, setLines] = useState<ReceiptLineDraft[]>([
-    { crop_id: crops[0]?.id || 'c_tomato', kg_received: 50, grade: 'A' },
+    { crop_id: crops[0]?.id || 'c_tomato', kg_received: API_DEMO_MODE ? 50 : 0, grade: 'A' },
   ]);
   const [activeLineIdx, setActiveLineIdx] = useState<number>(0);
   const [farmerConfirmed, setFarmerConfirmed] = useState(false);
@@ -85,7 +86,7 @@ export const ReceiptForm: React.FC<ReceiptFormProps> = ({
     };
 
     // If offline, enqueue
-    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    if (API_DEMO_MODE && typeof navigator !== 'undefined' && !navigator.onLine) {
       offlineQueue.enqueue({
         type: 'PICKUP_RECEIPT',
         endpoint: `/trips/${tripId}/stops/${stopId}/receipt`,
@@ -162,6 +163,7 @@ export const ReceiptForm: React.FC<ReceiptFormProps> = ({
           size="sm"
           variant="outline"
           onClick={handleAddLine}
+          disabled={!API_DEMO_MODE}
           className="shrink-0 rounded-xl font-bold flex items-center gap-1"
         >
           <Plus className="h-4 w-4" />
@@ -229,6 +231,7 @@ export const ReceiptForm: React.FC<ReceiptFormProps> = ({
         <button
           type="button"
           onClick={() => setIsPhotoAttached(!isPhotoAttached)}
+          disabled={!API_DEMO_MODE}
           className={`px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-all ${
             isPhotoAttached
               ? 'bg-emerald-50 text-emerald-700 border-emerald-300'

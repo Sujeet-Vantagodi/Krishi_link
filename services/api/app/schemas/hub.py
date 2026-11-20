@@ -27,6 +27,11 @@ class HubResponse(HubBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+class HubListResponse(BaseModel):
+    items: list[HubResponse]
+    total: int
+
+
 class HubStockStatusResponse(BaseModel):
     hub_id: uuid.UUID
     crop_id: uuid.UUID
@@ -50,6 +55,7 @@ class StockMatrixCell(BaseModel):
     suggested: Optional[StockStatus] = None
     set_by: Optional[str] = None
     set_at: Optional[datetime] = None
+    exact_kg: float
 
 
 class HubStockMatrixRow(BaseModel):

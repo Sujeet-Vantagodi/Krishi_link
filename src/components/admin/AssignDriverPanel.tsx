@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { User, Vehicle, TripStop } from '../../types';
 import { Button } from '../ui/button';
 import { Truck, UserCheck, Sparkles, Send, GripVertical, CheckCircle2 } from 'lucide-react';
@@ -37,6 +37,8 @@ export const AssignDriverPanel: React.FC<AssignDriverPanelProps> = ({
   const [selectedDriverId, setSelectedDriverId] = useState<string>(drivers[0]?.user_id || '');
   const [selectedVehicleId, setSelectedVehicleId] = useState<string>(vehicles[0]?.id || '');
   const [orderedStops, setOrderedStops] = useState<TripStop[]>(stops);
+
+  useEffect(() => { setOrderedStops(stops); }, [stops]);
 
   const selectedDriver = drivers.find((d) => d.user_id === selectedDriverId);
   const selectedVehicle = vehicles.find((v) => v.id === selectedVehicleId);

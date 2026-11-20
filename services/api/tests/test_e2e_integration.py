@@ -22,7 +22,7 @@ Covers all 14 steps + security assertions:
   7.  Driver starts, arrives, records 95 kg receipt
   7b. Duplicate receipt idempotent
   8.  Hub receives 93 kg → stock ledger credited
-  9.  Stock ledger has exactly 1 PICKUP entry (+93 kg)
+  9.  Stock ledger has exactly 1 PICKUP entry (+91 kg)
   10. Buyer places order (50 kg) successfully
   11. Oversell attempt (10 000 kg) blocked
   12. Trip closed
@@ -366,22 +366,22 @@ def test_08_hub_receive(db, ctx):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Step 9 — Stock ledger updated exactly once (+93 kg)
+# Step 9 — Stock ledger updated exactly once (+91 kg)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def test_09_stock_ledger_exact_once(db, ctx):
-    """Exactly one PICKUP ledger entry for this hub+crop with delta=93."""
+    """Exactly one PICKUP ledger entry for this hub+crop with delta=91."""
     entries = db.query(StockLedger).filter(
         StockLedger.hub_id == ctx["main_hub"].id,
         StockLedger.crop_id == ctx["tomato"].id,
         StockLedger.reason == LedgerReason.PICKUP,
     ).all()
     assert len(entries) == 1, f"Expected 1, got {len(entries)}: {entries}"
-    assert float(entries[0].delta_kg) == 93.0
+    assert float(entries[0].delta_kg) == 91.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Step 10 — Buyer places order (50 kg, within 93 kg stock)
+# Step 10 — Buyer places order (50 kg, within 91 kg stock)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def test_10_buyer_places_order(db, ctx):
@@ -414,7 +414,7 @@ def test_10_buyer_places_order(db, ctx):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Step 11 — Oversell blocked (10 000 kg > 93 kg available)
+# Step 11 — Oversell blocked (10 000 kg > 91 kg available)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def test_11_oversell_blocked(db, ctx):

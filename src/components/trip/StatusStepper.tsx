@@ -57,7 +57,7 @@ export const StatusStepper: React.FC<StatusStepperProps> = ({
       );
     }
 
-    if (currentStopStatus === 'ARRIVED') {
+    if (currentStopStatus === 'ARRIVED' || currentStopStatus === 'IN_PROGRESS') {
       return (
         <Button
           onClick={onOpenReceipt}

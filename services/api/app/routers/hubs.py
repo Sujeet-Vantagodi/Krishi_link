@@ -13,7 +13,7 @@ from app.models.enums import TripStatus, TripType
 from app.models.stock import HubStockStatus, StockLedger
 from app.models.enums import UserRole, StockStatus, LedgerReason
 from app.schemas.hub import (
-    HubCreate, HubResponse, HubStockStatusResponse,
+    HubCreate, HubListResponse, HubResponse, HubStockStatusResponse,
     HubStockStatusUpdate, StockMatrixResponse, StockAdjustmentCreate
 )
 from app.core.dependencies import require_roles, get_current_user
@@ -43,7 +43,14 @@ def api_hub_inbound_trips(id: uuid.UUID, current_user: User = Depends(require_ro
     if current_user.role == UserRole.HUB_STAFF and not db.get(HubStaff, (current_user.id, id)):
         raise ForbiddenException("Hub staff may only view an assigned hub")
     trips = db.query(Trip).filter(Trip.dest_hub_id == id, Trip.status.in_([TripStatus.ASSIGNED, TripStatus.ACKNOWLEDGED, TripStatus.STARTED, TripStatus.AT_HUB])).order_by(Trip.planned_start).all()
-    return {"items": [{"id": str(t.id), "type": t.type.value, "status": t.status.value, "driver_id": str(t.driver_id), "vehicle_id": str(t.vehicle_id), "stop_count": len(t.stops)} for t in trips], "total": len(trips)}
+    received = {(row.trip_id, row.crop_id) for row in db.query(HubReceipt).filter_by(hub_id=id).all()}
+    return {"items": [{
+        "id": str(t.id), "type": t.type.value, "status": t.status.value,
+        "driver_id": str(t.driver_id), "vehicle_id": str(t.vehicle_id), "stop_count": len(t.stops),
+        "crops": dict({str(receipt.crop_id): receipt.crop.name_en
+                       for stop in t.stops for receipt in stop.receipts
+                       if receipt.farmer_confirmed and (t.id, receipt.crop_id) not in received}),
+    } for t in trips], "total": len(trips)}
 
 
 @router.get("/{id}/stock-ledger")
@@ -56,7 +63,7 @@ def api_hub_stock_ledger(id: uuid.UUID, current_user: User = Depends(require_rol
     return {"items": [{"id": row.id, "crop_id": str(row.crop_id), "delta_kg": float(row.delta_kg), "reason": row.reason.value, "ref_type": row.ref_type, "created_at": row.created_at} for row in rows], "total": len(rows)}
 
 
-@router.get("", response_model=dict)
+@router.get("", response_model=HubListResponse)
 def api_list_hubs(db: Session = Depends(get_db)):
     hubs = db.query(Hub).filter(Hub.active == True).order_by(Hub.name).all()
     items = []
@@ -70,7 +77,7 @@ def api_list_hubs(db: Session = Depends(get_db)):
             "lat": loc.get("lat"),
             "lng": loc.get("lng"),
             "address": h.address,
-            "capacity_kg": float(h.capacity_kg) if h.capacity_kg else None,
+            "capacity_kg": float(h.capacity_kg) if h.capacity_kg is not None else None,
             "has_cold_room": h.has_cold_room,
             "active": h.active
         })
@@ -105,7 +112,7 @@ def api_create_hub(
         lat=loc.get("lat"),
         lng=loc.get("lng"),
         address=hub.address,
-        capacity_kg=float(hub.capacity_kg) if hub.capacity_kg else None,
+        capacity_kg=float(hub.capacity_kg) if hub.capacity_kg is not None else None,
         has_cold_room=hub.has_cold_room,
         active=hub.active
     )
@@ -116,8 +123,12 @@ def api_get_stock_matrix(
     current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.HUB_STAFF)),
     db: Session = Depends(get_db)
 ):
-    matrix_data = get_stock_matrix_data(db)
-    return matrix_data
+    hub_ids = None
+    if current_user.role == UserRole.HUB_STAFF:
+        hub_ids = {
+            hub_id for (hub_id,) in db.query(HubStaff.hub_id).filter(HubStaff.user_id == current_user.id).all()
+        }
+    return get_stock_matrix_data(db, hub_ids)
 
 
 @router.get("/{id}", response_model=HubResponse)
@@ -172,6 +183,8 @@ def api_update_stock_button(
     current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.HUB_STAFF)),
     db: Session = Depends(get_db)
 ):
+    if current_user.role == UserRole.HUB_STAFF and not db.get(HubStaff, (current_user.id, id)):
+        raise ForbiddenException("Hub staff may only update an assigned hub")
     record = update_hub_stock_status(
         db=db,
         hub_id=id,
@@ -204,6 +217,8 @@ def api_hub_weigh_in(
     current_user: User = Depends(require_roles(UserRole.HUB_STAFF, UserRole.ADMIN, UserRole.SUPER_ADMIN)),
     db: Session = Depends(get_db)
 ):
+    from app.services.trip_service import hub_receive, verified_saleable_weight
+
     hub = db.query(Hub).filter(Hub.id == id).first()
     if not hub:
         raise NotFoundException("Hub", id)
@@ -215,14 +230,20 @@ def api_hub_weigh_in(
             raise NotFoundException("Trip", trip_id)
         if trip.status != TripStatus.AT_HUB or trip.dest_hub_id != id:
             raise ForbiddenException("Trip must be marked at its assigned destination hub before receipt")
-    lock_hub_inventory(db, id)
-    if trip_id and db.query(HubReceipt).filter(HubReceipt.trip_id == trip_id, HubReceipt.crop_id == crop_id).first():
-        raise ForbiddenException("A receipt for this trip and crop was already recorded")
 
     # Calculate weight variance
     variance_pct = None
     if kg_driver and kg_driver > 0:
         variance_pct = round(((kg_hub - kg_driver) / kg_driver) * 100, 2)
+
+    if trip_id:
+        receipt = hub_receive(db, trip_id, id, crop_id, kg_hub, kg_driver,
+                              grade_a_kg, grade_b_kg, reject_kg, current_user)
+        return {"message": "Hub weigh-in recorded and stock ledger updated",
+                "receipt_id": receipt.id, "kg_hub": kg_hub, "variance_pct": variance_pct}
+
+    accepted_kg = verified_saleable_weight(kg_hub, grade_a_kg, grade_b_kg, reject_kg)
+    lock_hub_inventory(db, id)
 
     receipt = HubReceipt(
         trip_id=trip_id,
@@ -237,7 +258,7 @@ def api_hub_weigh_in(
     )
     db.add(receipt)
     db.flush()
-    db.add(StockLedger(hub_id=id, crop_id=crop_id, delta_kg=kg_hub, reason=LedgerReason.PICKUP, created_by=current_user.id, ref_type="hub_receipt", ref_id=receipt.id))
+    db.add(StockLedger(hub_id=id, crop_id=crop_id, delta_kg=accepted_kg, reason=LedgerReason.PICKUP, created_by=current_user.id, ref_type="hub_receipt", ref_id=receipt.id))
     try:
         db.commit()
     except IntegrityError:

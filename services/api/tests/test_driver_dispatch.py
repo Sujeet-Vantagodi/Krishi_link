@@ -208,7 +208,7 @@ def test_hub_receive_credits_stock_ledger(db_session, seed_data):
         StockLedger.hub_id == hub_id,
         StockLedger.crop_id == crop_id,
     ).order_by(StockLedger.id.desc()).first()
-    assert float(latest.delta_kg) == 200.0
+    assert float(latest.delta_kg) == 195.0
 
 
 # ── Scenario 7: Duplicate hub receipt is rejected ────────────────────────────

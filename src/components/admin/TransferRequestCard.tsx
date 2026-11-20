@@ -99,14 +99,14 @@ export const TransferRequestCard: React.FC<TransferRequestCardProps> = ({
           </>
         )}
 
-        {transfer.status === 'APPROVED' && onAssignDriver && (
+        {(transfer.status === 'APPROVED' || transfer.status === 'ASSIGNED') && onAssignDriver && (
           <Button
             size="sm"
             onClick={() => onAssignDriver(transfer.id)}
             className="w-full text-xs h-8 bg-blue-600 hover:bg-blue-700 text-white font-bold flex items-center justify-center gap-1"
           >
             <Truck className="h-3.5 w-3.5" />
-            Assign Transfer Trip
+            {transfer.status === 'ASSIGNED' ? 'Dispatch Transfer' : 'Assign Transfer Trip'}
           </Button>
         )}
 

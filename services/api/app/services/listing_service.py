@@ -7,7 +7,7 @@ from app.models.listing import FarmerListing
 from app.models.user import Farmer, FarmerCropThreshold
 from app.models.crop import Crop
 from app.models.enums import ListingStatus
-from app.core.exceptions import NotFoundException, ThresholdNotMetException, CutoffPassedException, KrishiLinkException
+from app.core.exceptions import NotFoundException, CutoffPassedException, ConflictException
 
 
 def get_applicable_threshold(db: Session, farmer_id: uuid.UUID, crop_id: uuid.UUID) -> float:
@@ -37,15 +37,16 @@ def check_cutoff_passed(listing_date: date) -> bool:
     Cutoff is D-1 at 18:00 IST (UTC 12:30).
     If target date is today or in the past, or D-1 cutoff has passed.
     """
-    now_utc = datetime.now(timezone.utc)
-    # Target date collection cutoff is D-1 18:00 IST
-    # Convert listing_date D to D-1 12:30 UTC
-    cutoff_datetime = datetime(
-        listing_date.year, listing_date.month, listing_date.day,
-        12, 30, tzinfo=timezone.utc
-    ) - timedelta(days=1)
+    return datetime.now(timezone.utc) > listing_cutoff(listing_date)
 
-    return now_utc > cutoff_datetime
+
+def listing_cutoff(listing_date: date) -> datetime:
+    ist = timezone(timedelta(hours=5, minutes=30))
+    previous_day = listing_date - timedelta(days=1)
+    return datetime(
+        previous_day.year, previous_day.month, previous_day.day,
+        settings.LISTING_CUTOFF_HOUR_IST, tzinfo=ist,
+    )
 
 
 def create_or_update_listing(
@@ -81,9 +82,11 @@ def create_or_update_listing(
         FarmerListing.farmer_id == farmer_id,
         FarmerListing.crop_id == crop_id,
         FarmerListing.listing_date == listing_date
-    ).first()
+    ).with_for_update().first()
 
     if listing:
+        if listing.status in (ListingStatus.SCHEDULED, ListingStatus.COLLECTED):
+            raise ConflictException("The listing has already been scheduled or collected")
         listing.est_kg = est_kg
         listing.ready_from = ready_from
         listing.ready_by = ready_by

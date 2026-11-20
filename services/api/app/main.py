@@ -6,6 +6,7 @@ from fastapi.exceptions import RequestValidationError
 from app.config import settings
 from app.database import engine, Base
 from app.core.exceptions import KrishiLinkException
+from app.routers.auth import legacy_auth_router
 from app.routers import (
     auth_router, catalog_router, farmers_router,
     buyers_router, orders_router, hubs_router, admin_router,
@@ -51,13 +52,17 @@ async def krishilink_exception_handler(request: Request, exc: KrishiLinkExceptio
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = [
+        {"loc": error["loc"], "msg": error["msg"], "type": error["type"]}
+        for error in exc.errors()
+    ]
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={
             "error": {
                 "code": "VALIDATION_ERROR",
                 "message": "The request payload failed schema validation",
-                "details": {"errors": exc.errors()}
+                "details": {"errors": errors}
             }
         }
     )
@@ -75,6 +80,7 @@ app.include_router(driver_router, prefix=settings.API_V1_PREFIX)
 app.include_router(transfers_router, prefix=settings.API_V1_PREFIX)
 # Frontend compatibility bridge (bare /api/ paths — no v1 prefix)
 app.include_router(bridge_router)
+app.include_router(legacy_auth_router)
 
 
 @app.get("/health", tags=["Health"])

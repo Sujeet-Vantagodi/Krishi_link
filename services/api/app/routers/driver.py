@@ -8,13 +8,16 @@ Shared lifecycle: /trips/{id}/*  (driver or admin)
 import uuid
 from typing import List, Optional
 from fastapi import APIRouter, Depends, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from app.database import get_db
 from app.core.dependencies import get_current_user, require_roles
-from app.models.user import User
+from app.core.exceptions import ConflictException, ForbiddenException
+from app.models.user import Farmer, User
+from app.models.listing import FarmerListing
 from app.models.hub import HubStaff
-from app.models.enums import UserRole, TripStatus
+from app.models.enums import UserRole, TripStatus, TripType, StopStatus, TransferStatus
+from app.models.trip import HubReceipt, TransferRequest
 from app.schemas.trip import (
     TripSummary, TripDetail, TripStopOut,
     AssignTripIn, DriverAvailableOut,
@@ -136,6 +139,13 @@ def hub_receive(
         raise ForbiddenException("Hub staff may only receive stock at an assigned hub")
     if not trip or trip.dest_hub_id != hub_id:
         raise ForbiddenException("Hub must match the assigned trip destination")
+    if trip.status != TripStatus.AT_HUB:
+        raise ForbiddenException("Trip must reach the assigned hub before weigh-in")
+    if trip.type != TripType.FIRST_MILE or not any(
+        row.crop_id == payload.crop_id and row.farmer_confirmed
+        for stop in trip.stops if stop.status == StopStatus.COMPLETED for row in stop.receipts
+    ):
+        raise ConflictException("Hub weigh-in requires a completed pickup for this crop")
     receipt = trip_service.hub_receive(
         db,
         trip_id=trip_id,
@@ -179,6 +189,13 @@ def reached_hub(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    trip = trip_service.get_trip_or_404(db, trip_id)
+    if current_user.role == UserRole.DRIVER:
+        trip_service.assert_driver_owns_trip(trip, current_user.id)
+    if trip.type == TripType.FIRST_MILE and any(
+        stop.status not in (StopStatus.COMPLETED, StopStatus.SKIPPED) for stop in trip.stops
+    ):
+        raise ConflictException("Resolve the remaining pickup stops before reaching the hub")
     trip = trip_service.transition_trip(db, trip_id, TripStatus.AT_HUB, current_user)
     return _trip_to_summary(trip)
 
@@ -189,6 +206,18 @@ def return_trip(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    trip = trip_service.get_trip_or_404(db, trip_id)
+    if current_user.role == UserRole.DRIVER:
+        trip_service.assert_driver_owns_trip(trip, current_user.id)
+    if trip.type == TripType.FIRST_MILE:
+        collected = {receipt.crop_id for stop in trip.stops for receipt in stop.receipts}
+        weighed = {row.crop_id for row in db.query(HubReceipt).filter_by(trip_id=trip.id)}
+        if collected - weighed:
+            raise ConflictException("Complete hub weigh-in before returning this trip")
+    if trip.type == TripType.TRANSFER and db.query(TransferRequest).filter(
+        TransferRequest.trip_id == trip.id, TransferRequest.status != TransferStatus.RECEIVED,
+    ).first():
+        raise ConflictException("Complete measured transfer receipt before returning this trip")
     trip = trip_service.transition_trip(db, trip_id, TripStatus.RETURNED, current_user)
     return _trip_to_summary(trip)
 
@@ -255,6 +284,16 @@ def receipt_stop(
     )
 
 
+@router.post("/trips/{trip_id}/stops/{stop_id}/complete-pickup", response_model=TripStopOut)
+def complete_pickup(
+    trip_id: uuid.UUID,
+    stop_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return _stop_to_out(trip_service.complete_stop(db, trip_id, stop_id, current_user))
+
+
 @router.post("/trips/{trip_id}/stops/{stop_id}/deliver", response_model=TripStopOut)
 def deliver_stop(
     trip_id: uuid.UUID,
@@ -312,13 +351,30 @@ def _trip_to_detail(trip) -> TripDetail:
         planned_minutes=trip.planned_minutes, created_at=trip.created_at,
         stop_count=len(trip.stops) if trip.stops else 0,
         stops=[_stop_to_out(s) for s in (trip.stops or [])],
+        vehicle={"id": trip.vehicle.id, "reg_no": trip.vehicle.reg_no, "type": trip.vehicle.type,
+                 "capacity_kg": float(trip.vehicle.capacity_kg), "ownership": trip.vehicle.ownership,
+                 "active": trip.vehicle.active} if trip.vehicle else None,
+        origin={"name": trip.origin_hub.name, "address": trip.origin_hub.address} if trip.origin_hub else None,
+        destination={"name": trip.dest_hub.name, "address": trip.dest_hub.address} if trip.dest_hub else None,
     )
 
 
 def _stop_to_out(stop) -> TripStopOut:
+    db = object_session(stop)
+    listing = db.get(FarmerListing, stop.listing_id) if stop.listing_id else None
+    farmer = db.get(Farmer, stop.farmer_id) if stop.farmer_id else None
+    name = farmer.user.name if farmer else None
+    address = farmer.village if farmer else None
+    if stop.buyer_order:
+        name = stop.buyer_order.buyer.business_name
+        address = stop.buyer_order.delivery_address
     return TripStopOut(
         id=stop.id, seq=stop.seq, type=stop.type, status=stop.status,
         farmer_id=stop.farmer_id, buyer_order_id=stop.buyer_order_id,
+        listing_id=stop.listing_id, crop_id=listing.crop_id if listing else None,
+        name=name, address=address, expected_kg=float(listing.est_kg) if listing else None,
+        receipt_lines=[{"id": row.id, "crop_id": row.crop_id, "kg_received": float(row.kg_received),
+                        "grade": row.grade} for row in stop.receipts],
         hub_id=stop.hub_id, location=stop.location,
         eta=stop.eta, arrived_at=stop.arrived_at,
         completed_at=stop.completed_at, skip_reason=stop.skip_reason,

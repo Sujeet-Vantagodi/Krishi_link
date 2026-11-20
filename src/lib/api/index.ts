@@ -1,11 +1,14 @@
 import { mockDb } from './mock/db';
-import { delay, ApiError, API_BASE_URL } from './client';
+import { delay, ApiError, API_DEMO_MODE, requestApi } from './client';
 import { mockRealtime } from '../realtime/mockRealtime';
+import { calculateDistanceKm } from '../geo';
 import {
   Crop,
   Order,
   FarmerListing,
   Trip,
+  TripStop,
+  Vehicle,
   Hub,
   StockStatus,
   TransferRequest,
@@ -15,6 +18,110 @@ import {
   AlertItem,
 } from '../../types';
 
+type Thresholds = {
+  default_min_kg: number;
+  per_crop: { crop_id: string; min_kg: number }[];
+};
+
+type CatalogCrop = Omit<Crop, 'name_kn' | 'category' | 'shelf_life_days' | 'image_emoji' | 'price'> & {
+  name_kn: string | null;
+  category: string | null;
+  shelf_life_hours: number | null;
+  price: Crop['price'] | null;
+};
+
+const cropCategories: readonly string[] = ['leafy', 'roots', 'fruit_veg', 'gourds', 'herbs'];
+
+function toCrop(row: CatalogCrop): Crop | undefined {
+  const { name_kn, category, shelf_life_hours, price, ...crop } = row;
+  const normalizedCategory = category === 'root' ? 'roots' : category;
+  if (price === null || shelf_life_hours === null || !normalizedCategory || !cropCategories.includes(normalizedCategory)) {
+    return undefined;
+  }
+  return {
+    ...crop,
+    name_kn: name_kn || row.name_en,
+    category: normalizedCategory as Crop['category'],
+    shelf_life_days: shelf_life_hours / 24,
+    image_emoji: '',
+    price,
+  };
+}
+
+type HubResponse = Omit<Hub, 'location' | 'address' | 'capacity_kg'> & {
+  lat: number | null;
+  lng: number | null;
+  address: string | null;
+  capacity_kg: number | null;
+};
+
+function toHub({ lat, lng, address, capacity_kg, ...hub }: HubResponse): Hub {
+  if (lat == null || lng == null || address == null || capacity_kg == null) {
+    throw new ApiError('HUB_DETAILS_UNAVAILABLE', `Hub details are incomplete for ${hub.name}`);
+  }
+  return { ...hub, location: { lat, lng }, address, capacity_kg };
+}
+
+type ListingResponse = Omit<FarmerListing, 'ready_by' | 'min_kg_applied'> & {
+  ready_by: string | null;
+  min_kg_applied: number | null;
+};
+
+const farmTime = new Intl.DateTimeFormat('en-IN', {
+  timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true,
+});
+
+function toListing(row: ListingResponse, crop?: Crop): FarmerListing {
+  if (row.min_kg_applied === null) {
+    throw new ApiError('LISTING_DETAILS_UNAVAILABLE', 'The listing is missing its applied pickup threshold');
+  }
+  const timestamp = row.ready_by && (/(?:Z|[+-]\d\d:\d\d)$/.test(row.ready_by) ? row.ready_by : `${row.ready_by}Z`);
+  return { ...row, ready_by: timestamp ? farmTime.format(new Date(timestamp)) : '', min_kg_applied: row.min_kg_applied, crop };
+}
+
+function listingSchedule(readyBy: string, listingDate?: string) {
+  const date = listingDate ?? new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Kolkata' })
+    .format(new Date(Date.now() + 86_400_000));
+  const clock = /^(0?[1-9]|1[0-2]):([0-5]\d)\s*(AM|PM)$/i.exec(readyBy.trim());
+  if (!clock) throw new ApiError('INVALID_READY_TIME', 'Enter a ready time such as 06:00 AM');
+  const hour = Number(clock[1]) % 12 + (clock[3].toUpperCase() === 'PM' ? 12 : 0);
+  const readyTime = new Date(`${date}T${String(hour).padStart(2, '0')}:${clock[2]}:00+05:30`);
+  if (Number.isNaN(readyTime.getTime())) throw new ApiError('INVALID_LISTING_DATE', 'Enter a valid listing date');
+  return { listing_date: date, ready_by: readyTime.toISOString() };
+}
+
+function tripAction(id: string, action: string) {
+  return requestApi<{ status: string }>(`/trips/${encodeURIComponent(id)}/${action}`, 'POST');
+}
+
+type SettlementResponse = Omit<FarmerSettlement, 'status' | 'farmer_name' | 'paid_at'> & {
+  status: 'DRAFT' | 'APPROVED' | 'PAID';
+  farmer_name: string | null;
+  paid_at: string | null;
+};
+
+function toSettlement({ status, farmer_name, paid_at, ...settlement }: SettlementResponse): FarmerSettlement {
+  return {
+    ...settlement,
+    farmer_name: farmer_name ?? '',
+    paid_at: paid_at ?? undefined,
+    status: status === 'DRAFT' ? 'DUE' : status,
+  };
+}
+
+async function getSettlementStatements(path: string): Promise<FarmerSettlement[]> {
+  const { items } = await requestApi<{ items: SettlementResponse[] }>(path);
+  return items.map(toSettlement);
+}
+
+function stopAction(tripId: string, stopId: string, action: string, body: unknown) {
+  return requestApi<{ status: string }>(
+    `/trips/${encodeURIComponent(tripId)}/stops/${encodeURIComponent(stopId)}/${action}`,
+    'POST',
+    body,
+  );
+}
+
 // ==================== 1. CATALOG & CROPS ====================
 
 export async function getCrops(params?: {
@@ -22,6 +129,14 @@ export async function getCrops(params?: {
   category?: string;
   organic?: boolean;
 }): Promise<Crop[]> {
+  if (!API_DEMO_MODE) {
+    const query = new URLSearchParams();
+    if (params?.query) query.set('query', params.query);
+    if (params?.category && params.category !== 'all') query.set('category', params.category);
+    if (params?.organic !== undefined) query.set('organic', String(params.organic));
+    const { items } = await requestApi<{ items: CatalogCrop[] }>(`/crops?${query}`);
+    return items.map(toCrop).filter((crop): crop is Crop => crop !== undefined);
+  }
   await delay(180);
   let list = [...mockDb.crops];
   if (params?.query) {
@@ -42,6 +157,12 @@ export async function getCrops(params?: {
 }
 
 export async function getCropById(id: string): Promise<Crop> {
+  if (!API_DEMO_MODE) {
+    const row = await requestApi<CatalogCrop>(`/catalog/crops/${encodeURIComponent(id)}`);
+    const crop = toCrop(row);
+    if (!crop) throw new ApiError('CROP_DETAILS_UNAVAILABLE', 'Published crop details are incomplete');
+    return crop;
+  }
   await delay(120);
   const crop = mockDb.crops.find((c) => c.id === id);
   if (!crop) throw new ApiError('NOT_FOUND', 'Crop not found');
@@ -49,6 +170,13 @@ export async function getCropById(id: string): Promise<Crop> {
 }
 
 export async function getTodayPrices(): Promise<{ crop_id: string; price: any }[]> {
+  if (!API_DEMO_MODE) {
+    const { date, items } = await requestApi<{
+      date: string;
+      items: Array<{ crop_id: string; low: number; high: number; currency: string }>;
+    }>('/prices/today');
+    return items.map(({ crop_id, low, high, currency }) => ({ crop_id, price: { low, high, currency, date } }));
+  }
   await delay(150);
   return mockDb.crops.map((c) => ({
     crop_id: c.id,
@@ -58,6 +186,21 @@ export async function getTodayPrices(): Promise<{ crop_id: string; price: any }[
 
 // ==================== 2. BUYER ENDPOINTS ====================
 
+type BuyerOrderRecord = Omit<Order, 'location'> & {
+  location: Order['location'] | null;
+  delivery_code?: string | null;
+};
+
+function presentBuyerOrder(record: BuyerOrderRecord, crops: Crop[]): Order {
+  // Checkout and history do not use map coordinates. Tracking stays disabled
+  // until the screen can represent an order with no verified coordinates.
+  return {
+    ...record,
+    delivery_otp: record.delivery_code ?? undefined,
+    items: record.items.map((item) => ({ ...item, crop: crops.find((crop) => crop.id === item.crop_id) })),
+  } as Order;
+}
+
 export async function createOrder(data: {
   delivery_date: string;
   slot: string;
@@ -66,6 +209,16 @@ export async function createOrder(data: {
   address?: string;
   buyer_id?: string;
 }): Promise<Order> {
+  if (!API_DEMO_MODE) {
+    const crops = await getCrops();
+    const record = await requestApi<BuyerOrderRecord>('/orders/checkout', 'POST', {
+      slot: data.slot,
+      payment_mode: data.payment_mode === 'UPI' ? 'PREPAID' : data.payment_mode,
+      items: data.items,
+      address: data.address,
+    });
+    return presentBuyerOrder(record, crops);
+  }
   await delay(350);
 
   let totalPaise = 0;
@@ -132,6 +285,14 @@ export async function createOrder(data: {
 }
 
 export async function getOrders(status?: string): Promise<Order[]> {
+  if (!API_DEMO_MODE) {
+    const query = status ? `?status=${encodeURIComponent(status)}` : '';
+    const [result, crops] = await Promise.all([
+      requestApi<{ items: BuyerOrderRecord[] }>(`/orders/history${query}`),
+      getCrops(),
+    ]);
+    return result.items.map((order) => presentBuyerOrder(order, crops));
+  }
   await delay(180);
   if (status) {
     return mockDb.orders.filter((o) => o.status === status);
@@ -140,6 +301,13 @@ export async function getOrders(status?: string): Promise<Order[]> {
 }
 
 export async function getOrderById(id: string): Promise<Order> {
+  if (!API_DEMO_MODE) {
+    const [order, crops] = await Promise.all([
+      requestApi<BuyerOrderRecord>(`/orders/history/${encodeURIComponent(id)}`),
+      getCrops(),
+    ]);
+    return presentBuyerOrder(order, crops);
+  }
   await delay(120);
   const order = mockDb.orders.find((o) => o.id === id);
   if (!order) throw new ApiError('NOT_FOUND', 'Order not found');
@@ -147,6 +315,7 @@ export async function getOrderById(id: string): Promise<Order> {
 }
 
 export async function cancelOrder(id: string): Promise<{ success: boolean }> {
+  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
   await delay(200);
   const order = mockDb.orders.find((o) => o.id === id);
   if (!order) throw new ApiError('NOT_FOUND', 'Order not found');
@@ -155,6 +324,19 @@ export async function cancelOrder(id: string): Promise<{ success: boolean }> {
 }
 
 export async function getOrderTracking(id: string) {
+  if (!API_DEMO_MODE) {
+    return requestApi<{
+      order_id: string;
+      status: Order['status'];
+      driver?: { name?: string; phone?: string; vehicle_no?: string };
+      vehicle: (Trip['current_location']) | null;
+      destination: TripStop['location'] | null;
+      eta_minutes: number | null;
+      trip_id?: string;
+      route_polyline?: Trip['route_polyline'];
+      delivery_otp?: string;
+    }>(`/orders/${encodeURIComponent(id)}/tracking`);
+  }
   await delay(200);
   const order = mockDb.orders.find((o) => o.id === id);
   if (!order) throw new ApiError('NOT_FOUND', 'Order not found');
@@ -181,6 +363,7 @@ export async function confirmDelivery(
   orderId: string,
   data: { otp: string; items: any[]; feedback?: string }
 ): Promise<{ success: boolean; status: string }> {
+  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
   await delay(300);
   const order = mockDb.orders.find((o) => o.id === orderId);
   if (!order) throw new ApiError('NOT_FOUND', 'Order not found');
@@ -194,6 +377,7 @@ export async function requestMaskedCall(data: {
   trip_id?: string;
   target: 'driver' | 'farmer' | 'buyer' | 'ops';
 }): Promise<{ call_id: string; status: string; bridge_number: string }> {
+  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
   await delay(400);
   return {
     call_id: 'call_' + Math.random().toString(36).substring(2, 8),
@@ -205,6 +389,13 @@ export async function requestMaskedCall(data: {
 // ==================== 3. FARMER ENDPOINTS ====================
 
 export async function getFarmerThreshold(farmerId = 'u_farmer_1') {
+  if (!API_DEMO_MODE) {
+    const result = await requestApi<Thresholds>('/farmers/me/threshold');
+    return {
+      default_min_kg: result.default_min_kg,
+      crop_thresholds: Object.fromEntries(result.per_crop.map(({ crop_id, min_kg }) => [crop_id, min_kg])),
+    };
+  }
   await delay(120);
   const farmer = mockDb.farmers.find((f) => f.user_id === farmerId);
   return {
@@ -217,6 +408,13 @@ export async function updateFarmerThreshold(
   farmerId = 'u_farmer_1',
   data: { default_min_kg: number; per_crop?: Record<string, number> }
 ) {
+  if (!API_DEMO_MODE) {
+    const result = await requestApi<{ default_min_kg: number }>('/farmers/me/threshold', 'PUT', {
+      default_min_kg: data.default_min_kg,
+      per_crop: data.per_crop && Object.entries(data.per_crop).map(([crop_id, min_kg]) => ({ crop_id, min_kg })),
+    });
+    return { success: true, default_min_kg: result.default_min_kg };
+  }
   await delay(250);
   const farmer = mockDb.farmers.find((f) => f.user_id === farmerId);
   if (farmer) {
@@ -227,6 +425,14 @@ export async function updateFarmerThreshold(
 }
 
 export async function getFarmerListings(farmerId = 'u_farmer_1'): Promise<FarmerListing[]> {
+  if (!API_DEMO_MODE) {
+    const [{ items }, crops] = await Promise.all([
+      requestApi<{ items: ListingResponse[] }>('/farmers/me/listings'),
+      getCrops(),
+    ]);
+    const cropById = new Map(crops.map((crop) => [crop.id, crop]));
+    return items.filter(({ status }) => status !== 'CANCELLED').map((row) => toListing(row, cropById.get(row.crop_id)));
+  }
   await delay(180);
   return mockDb.listings.filter((l) => l.farmer_id === farmerId);
 }
@@ -238,6 +444,14 @@ export async function createFarmerListing(data: {
   ready_by: string;
   listing_date?: string;
 }): Promise<FarmerListing> {
+  if (!API_DEMO_MODE) {
+    const schedule = listingSchedule(data.ready_by, data.listing_date);
+    const crop = await getCropById(data.crop_id);
+    const row = await requestApi<ListingResponse>('/farmers/me/listings', 'POST', {
+      crop_id: data.crop_id, est_kg: data.est_kg, ...schedule,
+    });
+    return toListing(row, crop);
+  }
   await delay(300);
   const farmerId = data.farmer_id || 'u_farmer_1';
   const farmer = mockDb.farmers.find((f) => f.user_id === farmerId);
@@ -289,12 +503,17 @@ export async function createFarmerListing(data: {
 }
 
 export async function deleteFarmerListing(id: string): Promise<{ success: boolean }> {
+  if (!API_DEMO_MODE) {
+    await requestApi(`/farmers/me/listings/${encodeURIComponent(id)}`, 'DELETE');
+    return { success: true };
+  }
   await delay(180);
   mockDb.listings = mockDb.listings.filter((l) => l.id !== id);
   return { success: true };
 }
 
 export async function getFarmerPickup(farmerId = 'u_farmer_1') {
+  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
   await delay(180);
   // Find trip 1 which picks up from farmer 1
   const trip = mockDb.trips[0];
@@ -313,6 +532,7 @@ export async function getFarmerPickup(farmerId = 'u_farmer_1') {
 }
 
 export async function getFarmerPayments(farmerId = 'u_farmer_1'): Promise<FarmerSettlement[]> {
+  if (!API_DEMO_MODE) return getSettlementStatements('/farmers/me/settlements');
   await delay(180);
   return mockDb.settlements.filter((s) => s.farmer_id === farmerId);
 }
@@ -320,29 +540,52 @@ export async function getFarmerPayments(farmerId = 'u_farmer_1'): Promise<Farmer
 // ==================== 4. DRIVER ENDPOINTS ====================
 
 export async function getDriverTrips(driverId = 'u_driver_1'): Promise<Trip[]> {
-  try {
-    const res = await fetch(`${API_BASE_URL}/driver/me/trips?driver_id=${driverId}`);
-    if (res.ok) {
-      const data = await res.json();
-      if (data.trips && data.trips.length > 0) {
-        return data.trips as Trip[];
-      }
-    }
-  } catch (err) {
-    console.warn('Backend getDriverTrips fallback:', err);
+  if (!API_DEMO_MODE) {
+    const rows = await requestApi<{ id: string }[]>('/driver/me/trips');
+    return Promise.all(rows.map(({ id }) => getDriverTripById(id)));
   }
   await delay(200);
   return mockDb.trips.filter((t) => t.driver_id === driverId);
 }
 
 export async function getDriverTripById(id: string): Promise<Trip> {
+  if (!API_DEMO_MODE) return presentTrip(await requestApi<TripRecord>(`/driver/me/trips/${encodeURIComponent(id)}`));
   await delay(150);
   const trip = mockDb.trips.find((t) => t.id === id);
   if (!trip) throw new ApiError('NOT_FOUND', 'Trip not found');
   return trip;
 }
 
+type TripRecord = Pick<Trip, 'id' | 'type' | 'status' | 'driver_id' | 'vehicle_id' | 'vehicle'> & {
+  origin_hub_id?: string;
+  dest_hub_id?: string;
+  created_at: string;
+  planned_start?: string;
+  started_at?: string;
+  ended_at?: string;
+  stops: (TripStop & { buyer_order_id?: string; skip_reason?: string; crop_id?: string })[];
+};
+
+function presentTrip(record: TripRecord): Trip {
+  const stops = record.stops.map((stop) => ({
+    ...stop, trip_id: record.id, name: stop.name || 'Stop details unavailable',
+    address: stop.address ?? '', eta: stop.eta ?? '',
+    order_id: stop.buyer_order_id, skipped_reason: stop.skip_reason,
+  }));
+  return {
+    ...record, stops, hub_id: record.dest_hub_id ?? record.origin_hub_id ?? '',
+    date: (record.planned_start ?? record.created_at).slice(0, 10),
+    start_time: record.started_at, end_time: record.ended_at,
+    total_planned_kg: stops.reduce((sum, stop) => sum + (stop.expected_kg ?? 0), 0),
+    total_actual_kg: stops.flatMap((stop) => stop.receipt_lines ?? []).reduce((sum, line) => sum + line.kg_received, 0),
+    route_polyline: [],
+  };
+}
+
 export async function acknowledgeTrip(id: string): Promise<{ status: string }> {
+  if (!API_DEMO_MODE) {
+    return tripAction(id, 'acknowledge');
+  }
   await delay(200);
   const trip = mockDb.trips.find((t) => t.id === id);
   if (!trip) throw new ApiError('NOT_FOUND', 'Trip not found');
@@ -352,6 +595,9 @@ export async function acknowledgeTrip(id: string): Promise<{ status: string }> {
 }
 
 export async function startTrip(id: string): Promise<{ status: string }> {
+  if (!API_DEMO_MODE) {
+    return tripAction(id, 'start');
+  }
   await delay(250);
   const trip = mockDb.trips.find((t) => t.id === id);
   if (!trip) throw new ApiError('NOT_FOUND', 'Trip not found');
@@ -366,6 +612,21 @@ export async function arriveAtStop(
   stopId: string,
   _coords?: { lat: number; lng: number }
 ): Promise<{ stop_status: string }> {
+  if (!API_DEMO_MODE) {
+    const coords = _coords ?? await new Promise<{ lat: number; lng: number }>((resolve, reject) => {
+      if (!navigator.geolocation) {
+        reject(new ApiError('LOCATION_REQUIRED', 'Device location is unavailable'));
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        ({ coords }) => resolve({ lat: coords.latitude, lng: coords.longitude }),
+        () => reject(new ApiError('LOCATION_REQUIRED', 'Allow device location to record arrival')),
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 },
+      );
+    });
+    const result = await stopAction(tripId, stopId, 'arrive', coords);
+    return { stop_status: result.status };
+  }
   await delay(200);
   const trip = mockDb.trips.find((t) => t.id === tripId);
   const stop = trip?.stops.find((s) => s.id === stopId);
@@ -379,8 +640,18 @@ export async function arriveAtStop(
 export async function submitPickupReceipt(
   tripId: string,
   stopId: string,
-  data: { lines: any[]; farmer_confirmation: { method: string } }
+  data: { lines: any[]; farmer_confirmation: { method: string }; client_event_id?: string }
 ) {
+  if (!API_DEMO_MODE) {
+    if (data.lines.length !== 1 || !data.client_event_id || data.farmer_confirmation.method !== 'TAP') {
+      throw new ApiError('RECEIPT_EVIDENCE_REQUIRED', 'Record the measured grade and farmer confirmation for the assigned crop');
+    }
+    const { crop_id, kg_received, grade } = data.lines[0];
+    await stopAction(tripId, stopId, 'receipt', { crop_id, kg_received, grade, farmer_confirmed: true,
+                                                  client_event_id: data.client_event_id });
+    const stop = await stopAction(tripId, stopId, 'complete-pickup', undefined);
+    return { success: true, stop_status: stop.status };
+  }
   await delay(350);
   const trip = mockDb.trips.find((t) => t.id === tripId);
   const stop = trip?.stops.find((s) => s.id === stopId);
@@ -406,6 +677,7 @@ export async function submitDelivery(
   stopId: string,
   _data: { otp: string; rejected_kg?: number; reason?: string }
 ) {
+  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
   await delay(300);
   const trip = mockDb.trips.find((t) => t.id === tripId);
   const stop = trip?.stops.find((s) => s.id === stopId);
@@ -418,6 +690,10 @@ export async function submitDelivery(
 }
 
 export async function skipStop(tripId: string, stopId: string, data: { reason: string }) {
+  if (!API_DEMO_MODE) {
+    const result = await stopAction(tripId, stopId, 'skip', data);
+    return { success: true, stop_status: result.status };
+  }
   await delay(200);
   const trip = mockDb.trips.find((t) => t.id === tripId);
   const stop = trip?.stops.find((s) => s.id === stopId);
@@ -429,6 +705,9 @@ export async function skipStop(tripId: string, stopId: string, data: { reason: s
 }
 
 export async function reachedHub(tripId: string) {
+  if (!API_DEMO_MODE) {
+    return tripAction(tripId, 'reached-hub');
+  }
   await delay(250);
   const trip = mockDb.trips.find((t) => t.id === tripId);
   if (trip) {
@@ -440,6 +719,9 @@ export async function reachedHub(tripId: string) {
 }
 
 export async function returnTrip(tripId: string) {
+  if (!API_DEMO_MODE) {
+    return tripAction(tripId, 'return');
+  }
   await delay(250);
   const trip = mockDb.trips.find((t) => t.id === tripId);
   if (trip) {
@@ -453,11 +735,16 @@ export async function returnTrip(tripId: string) {
 // ==================== 5. HUBS & STOCK MATRIX ====================
 
 export async function getHubs(): Promise<Hub[]> {
+  if (!API_DEMO_MODE) {
+    const { items } = await requestApi<{ items: HubResponse[] }>('/hubs');
+    return items.map(toHub);
+  }
   await delay(150);
   return [...mockDb.hubs];
 }
 
 export async function getHubById(id: string): Promise<Hub> {
+  if (!API_DEMO_MODE) return toHub(await requestApi<HubResponse>(`/hubs/${encodeURIComponent(id)}`));
   await delay(120);
   const hub = mockDb.hubs.find((h) => h.id === id);
   if (!hub) throw new ApiError('NOT_FOUND', 'Hub not found');
@@ -465,6 +752,29 @@ export async function getHubById(id: string): Promise<Hub> {
 }
 
 export async function getStockMatrix() {
+  if (!API_DEMO_MODE) {
+    type StockCell = {
+      crop_id: string;
+      status: StockStatus;
+      suggested: StockStatus;
+      set_by: string | null;
+      set_at: string | null;
+      exact_kg: number;
+    };
+    const [grid, hubs, crops] = await Promise.all([
+      requestApi<{ hubs: { id: string; cells: StockCell[] }[] }>('/hubs/stock-matrix'),
+      getHubs(),
+      getCrops(),
+    ]);
+    const matrix = Object.fromEntries(grid.hubs.map(({ id, cells }) => [
+      id,
+      Object.fromEntries(cells.map(({ crop_id, set_by, set_at, ...cell }) => [
+        crop_id,
+        { ...cell, set_by: set_by ?? '', set_at: set_at ?? '' },
+      ])),
+    ]));
+    return { hubs: hubs.filter(({ id }) => matrix[id] !== undefined), crops, matrix };
+  }
   await delay(200);
   return {
     hubs: mockDb.hubs,
@@ -479,6 +789,13 @@ export async function updateStockStatus(
   status: StockStatus,
   setterName = 'Admin'
 ) {
+  if (!API_DEMO_MODE) {
+    return requestApi<{ status: StockStatus; set_by: string; set_at: string }>(
+      `/hubs/${encodeURIComponent(hubId)}/stock-status/${encodeURIComponent(cropId)}`,
+      'PUT',
+      { status },
+    );
+  }
   await delay(200);
   if (!mockDb.stockMatrix[hubId]) mockDb.stockMatrix[hubId] = {};
   mockDb.stockMatrix[hubId][cropId] = {
@@ -495,9 +812,42 @@ export async function updateStockStatus(
 // ==================== 6. TRANSFERS ====================
 
 export async function getTransfers(status?: string): Promise<TransferRequest[]> {
+  if (!API_DEMO_MODE) {
+    const query = status ? `?status=${encodeURIComponent(status)}` : '';
+    const [result, present] = await Promise.all([
+      requestApi<{ items: TransferRecord[] }>(`/transfers${query}`),
+      transferPresenter(),
+    ]);
+    return result.items.map(present);
+  }
   await delay(180);
   if (status) return mockDb.transfers.filter((t) => t.status === status);
   return [...mockDb.transfers];
+}
+
+type TransferRecord = Omit<TransferRequest, 'distance_km' | 'eta_hours' | 'trip_id'> & {
+  trip_id: string | null;
+};
+
+async function transferPresenter() {
+  const [hubs, crops] = await Promise.all([getHubs(), getCrops()]);
+  return (record: TransferRecord): TransferRequest => {
+    const from_hub = hubs.find(({ id }) => id === record.from_hub_id);
+    const to_hub = hubs.find(({ id }) => id === record.to_hub_id);
+    if (!from_hub || !to_hub) {
+      throw new ApiError('TRANSFER_HUB_DETAILS_UNAVAILABLE', 'The transfer is missing hub location data');
+    }
+    const distance = calculateDistanceKm(from_hub.location, to_hub.location);
+    return {
+      ...record,
+      trip_id: record.trip_id ?? undefined,
+      from_hub,
+      to_hub,
+      crop: crops.find(({ id }) => id === record.crop_id),
+      distance_km: Math.round(distance * 10) / 10,
+      eta_hours: Math.round(distance / 35 * 10) / 10,
+    };
+  };
 }
 
 export async function createTransfer(data: {
@@ -507,6 +857,10 @@ export async function createTransfer(data: {
   requested_kg: number;
   urgency?: 'LOW' | 'NORMAL' | 'HIGH' | 'CRITICAL';
 }): Promise<TransferRequest> {
+  if (!API_DEMO_MODE) {
+    const present = await transferPresenter();
+    return present(await requestApi<TransferRecord>('/transfers', 'POST', data));
+  }
   await delay(300);
   const fromHub = mockDb.hubs.find((h) => h.id === data.from_hub_id);
   const toHub = mockDb.hubs.find((h) => h.id === data.to_hub_id);
@@ -535,6 +889,12 @@ export async function createTransfer(data: {
 }
 
 export async function updateTransferStatus(id: string, status: any) {
+  if (!API_DEMO_MODE) {
+    const action = status === 'APPROVED' ? 'approve' : status === 'REJECTED' ? 'reject' : null;
+    if (!action) throw new ApiError('TRANSFER_EVIDENCE_REQUIRED', 'Dispatch requires an assigned trip and receiving requires a measured weight');
+    const present = await transferPresenter();
+    return present(await requestApi<TransferRecord>(`/transfers/${encodeURIComponent(id)}/${action}`, 'POST'));
+  }
   await delay(200);
   const tr = mockDb.transfers.find((t) => t.id === id);
   if (tr) {
@@ -547,6 +907,21 @@ export async function updateTransferStatus(id: string, status: any) {
 // ==================== 7. ADMIN DISPATCH & FLEET ====================
 
 export async function getDispatchPool() {
+  if (!API_DEMO_MODE) {
+    const [pool, crops, transfers] = await Promise.all([
+      requestApi<{ pending_pickups: (ListingResponse & { location?: TripStop['location']; village?: string })[] }>('/admin/dispatch/pool?upcoming=true'),
+      getCrops(),
+      getTransfers(),
+    ]);
+    const listings = pool.pending_pickups.filter((item) => item.min_kg_applied !== null).map((item) =>
+      toListing(item, crops.find((crop) => crop.id === item.crop_id)));
+    return {
+      farmer_pickups: listings.filter((item) => item.status === 'ELIGIBLE'),
+      ineligible_pickups: listings.filter((item) => item.status === 'INELIGIBLE'),
+      buyer_deliveries: [] as Order[],
+      pending_transfers: transfers.filter((row) => row.status === 'APPROVED' || row.status === 'REQUESTED'),
+    };
+  }
   await delay(220);
   return {
     farmer_pickups: mockDb.listings.filter((l) => l.status === 'ELIGIBLE'),
@@ -565,6 +940,12 @@ export async function assignTrip(data: {
   stops: any[];
   type?: any;
 }): Promise<Trip> {
+  if (!API_DEMO_MODE) {
+    return presentTrip(await requestApi<TripRecord>('/admin/assign', 'POST', {
+      driver_user_id: data.driver_id, vehicle_id: data.vehicle_id, dest_hub_id: data.hub_id,
+      stops: data.stops.map((stop) => ({ type: 'PICKUP', listing_id: stop.id.replace(/^stop_/, '') })),
+    }));
+  }
   await delay(400);
   const driver = mockDb.users.find((u) => u.id === data.driver_id);
   const vehicle = mockDb.vehicles.find((v) => v.id === data.vehicle_id);
@@ -595,23 +976,6 @@ export async function assignTrip(data: {
 
   mockDb.trips.unshift(newTrip);
 
-  // Sync assignment with live backend database
-  try {
-    await fetch(`${API_BASE_URL}/admin/assign`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        driver_id: data.driver_id,
-        vehicle_id: data.vehicle_id,
-        hub_id: data.hub_id,
-        type: data.type || 'FIRST_MILE',
-        stops: data.stops,
-      }),
-    });
-  } catch (err) {
-    console.warn('Backend assignTrip fallback:', err);
-  }
-
   // Notify driver channel
   mockRealtime.broadcast(`driver:${data.driver_id}`, 'assignment', newTrip);
   mockRealtime.broadcast('admin:live', 'trip_status', { trip_id: newTrip.id, status: 'ASSIGNED' });
@@ -620,11 +984,16 @@ export async function assignTrip(data: {
 }
 
 export async function getAdminTrips(): Promise<Trip[]> {
+  if (!API_DEMO_MODE) {
+    const { items } = await requestApi<{ items: { id: string }[] }>('/admin/trips');
+    return Promise.all(items.map(({ id }) => getAdminTripById(id)));
+  }
   await delay(200);
   return [...mockDb.trips];
 }
 
 export async function getAdminTripById(id: string): Promise<Trip> {
+  if (!API_DEMO_MODE) return presentTrip(await requestApi<TripRecord>(`/admin/trips/${encodeURIComponent(id)}`));
   await delay(150);
   const trip = mockDb.trips.find((t) => t.id === id);
   if (!trip) throw new ApiError('NOT_FOUND', 'Trip not found');
@@ -632,6 +1001,10 @@ export async function getAdminTripById(id: string): Promise<Trip> {
 }
 
 export async function getAvailableDrivers() {
+  if (!API_DEMO_MODE) {
+    const drivers = await requestApi<{ user_id: string; name: string; on_duty: boolean; vehicle?: Vehicle; active_trips: number }[]>('/admin/drivers/available');
+    return drivers.filter((driver) => driver.active_trips === 0 && driver.vehicle);
+  }
   await delay(150);
   return mockDb.drivers.map((d) => {
     const user = mockDb.users.find((u) => u.id === d.user_id);
@@ -648,6 +1021,7 @@ export async function getAvailableDrivers() {
 // ==================== 8. PRICING & FORECASTS ====================
 
 export async function getPricingForecasts(): Promise<MLPriceForecast[]> {
+  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
   await delay(200);
   return [...mockDb.priceForecasts];
 }
@@ -655,6 +1029,7 @@ export async function getPricingForecasts(): Promise<MLPriceForecast[]> {
 export async function publishPrices(
   items: { crop_id: string; low: number; high: number; override_reason?: string }[]
 ) {
+  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
   await delay(350);
   for (const item of items) {
     const crop = mockDb.crops.find((c) => c.id === item.crop_id);
@@ -673,6 +1048,7 @@ export async function publishPrices(
 }
 
 export async function getDemandForecasts(): Promise<MLDemandForecast[]> {
+  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
   await delay(200);
   return [...mockDb.demandForecasts];
 }
@@ -680,11 +1056,16 @@ export async function getDemandForecasts(): Promise<MLDemandForecast[]> {
 // ==================== 9. SETTLEMENTS & ADMIN REPORTS ====================
 
 export async function getAdminSettlements(): Promise<FarmerSettlement[]> {
+  if (!API_DEMO_MODE) return getSettlementStatements('/admin/settlements');
   await delay(180);
   return [...mockDb.settlements];
 }
 
 export async function approveSettlement(id: string) {
+  if (!API_DEMO_MODE) {
+    const row = await requestApi<SettlementResponse>(`/admin/settlements/${encodeURIComponent(id)}/approve`, 'POST');
+    return toSettlement(row);
+  }
   await delay(250);
   const s = mockDb.settlements.find((item) => item.id === id);
   if (s) s.status = 'APPROVED';
@@ -692,6 +1073,7 @@ export async function approveSettlement(id: string) {
 }
 
 export async function triggerPayouts() {
+  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
   await delay(400);
   mockDb.settlements.forEach((s) => {
     if (s.status === 'APPROVED' || s.status === 'DUE') {
@@ -704,11 +1086,13 @@ export async function triggerPayouts() {
 }
 
 export async function getAlerts(): Promise<AlertItem[]> {
+  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
   await delay(120);
   return [...mockDb.alerts];
 }
 
 export async function getSettings() {
+  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
   await delay(150);
   return {
     farmer_cutoff: '18:00',
@@ -721,21 +1105,25 @@ export async function getSettings() {
 }
 
 export async function getFarmersList() {
+  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
   await delay(150);
   return [...mockDb.farmers];
 }
 
 export async function getBuyersList() {
+  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
   await delay(150);
   return [...mockDb.buyers];
 }
 
 export async function getDriversList() {
+  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
   await delay(150);
   return [...mockDb.drivers];
 }
 
 export async function parseVoiceListing(text: string) {
+  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
   await delay(400);
   // Mock LLM parsing Kannada or English input like "200 kg tomato"
   return {

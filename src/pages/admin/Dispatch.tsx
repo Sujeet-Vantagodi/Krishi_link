@@ -1,3 +1,4 @@
+import { API_DEMO_MODE } from '../../lib/api/client';
 import React, { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getDispatchPool, getAvailableDrivers } from '../../lib/api';
@@ -12,12 +13,12 @@ import { Check, Send } from 'lucide-react';
 import { TableSkeleton } from '../../components/common/Skeletons';
 
 export const Dispatch: React.FC = () => {
-  const { data: pool, isLoading: poolLoading } = useQuery({
+  const { data: pool, isLoading: poolLoading, error: poolError } = useQuery({
     queryKey: ['dispatch_pool'],
     queryFn: getDispatchPool,
   });
 
-  const { data: drivers = [], isLoading: driversLoading } = useQuery({
+  const { data: drivers = [], isLoading: driversLoading, error: driversError } = useQuery({
     queryKey: ['available_drivers'],
     queryFn: getAvailableDrivers,
   });
@@ -26,8 +27,9 @@ export const Dispatch: React.FC = () => {
   const assignTripMutation = useAssignTrip();
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(
-    new Set(['list_1', 'list_3']) // pre-selected for instant demo!
+    new Set(API_DEMO_MODE ? ['list_1', 'list_3'] : []) // pre-selected for instant demo!
   );
+  const [destination, setDestination] = useState("");
   const [successToast, setSuccessToast] = useState<string | null>(null);
 
   // Convert selected pool items into TripStop items
@@ -37,16 +39,18 @@ export const Dispatch: React.FC = () => {
 
     // Eligible pickups
     pool.farmer_pickups.forEach((l) => {
-      if (selectedIds.has(l.id)) {
+      const source = l as typeof l & { location?: TripStop['location']; village?: string };
+      const location = API_DEMO_MODE ? { lat: 13.1672, lng: 78.0821 } : source.location;
+      if (selectedIds.has(l.id) && location) {
         result.push({
           id: `stop_${l.id}`,
           trip_id: '',
           seq: result.length + 1,
           type: 'PICKUP',
           status: 'PLANNED',
-          location: { lat: 13.1672, lng: 78.0821 }, // Kolar farm
+          location,
           name: `Farmer #${l.farmer_id} (${l.crop?.name_en})`,
-          address: 'Vemgal Village, Kolar Rural',
+          address: API_DEMO_MODE ? 'Vemgal Village, Kolar Rural' : source.village ?? '',
           expected_kg: l.est_kg,
           eta: l.ready_by,
           farmer_id: l.farmer_id,
@@ -87,17 +91,20 @@ export const Dispatch: React.FC = () => {
   };
 
   const handleAssign = async (data: { driver_id: string; vehicle_id: string; stops: TripStop[] }) => {
-    await assignTripMutation.mutateAsync({
+    if (!API_DEMO_MODE && !destination) return;
+    assignTripMutation.mutate({
       driver_id: data.driver_id,
       vehicle_id: data.vehicle_id,
-      hub_id: 'h_kolar',
+      hub_id: API_DEMO_MODE ? 'h_kolar' : destination,
       stops: data.stops,
-    });
-    setSuccessToast('Trip created & dispatched to driver app! Farmers & buyers notified.');
-    setSelectedIds(new Set());
-    setTimeout(() => setSuccessToast(null), 4000);
+    }, { onSuccess: () => {
+      setSuccessToast('Trip assigned.');
+      setSelectedIds(new Set());
+      setTimeout(() => setSuccessToast(null), 4000);
+    } });
   };
 
+  if (poolError || driversError) return <p role="alert" className="text-sm text-red-600">{(poolError || driversError)?.message}</p>;
   if (poolLoading || driversLoading || !pool) {
     return <TableSkeleton rows={6} />;
   }
@@ -155,13 +162,13 @@ export const Dispatch: React.FC = () => {
                 name: s.name,
                 location: s.location,
               }))}
-              routePolyline={stopsForAssignment.map((s) => s.location)}
+              routePolyline={API_DEMO_MODE ? stopsForAssignment.map((s) => s.location) : []}
               zoom={11}
               className="h-72 w-full"
             />
           </div>
 
-          <RouteSuggestionCard
+          {API_DEMO_MODE && <RouteSuggestionCard
             totalKg={totalSelectedKg}
             capacityKg={1000}
             distanceKm={38.4}
@@ -174,7 +181,7 @@ export const Dispatch: React.FC = () => {
                 reason: 'BELOW_MIN_PAYLOAD',
               },
             ]}
-          />
+          />}
         </div>
 
         {/* Pane 3 (Right): Assign Panel (4 cols) */}
@@ -182,16 +189,23 @@ export const Dispatch: React.FC = () => {
           <h3 className="text-xs font-black uppercase tracking-wider text-slate-400">
             Driver & Vehicle Assignment
           </h3>
+          {!API_DEMO_MODE && <label className="block text-xs font-bold text-slate-500">Destination hub
+            <select className="w-full rounded-xl border border-slate-200 p-2.5 dark:bg-slate-800" value={destination} onChange={(event) => setDestination(event.target.value)}>
+              <option value="">Select destination hub</option>
+              {hubs.map((hub) => <option key={hub.id} value={hub.id}>{hub.name}</option>)}
+            </select>
+          </label>}
+          {assignTripMutation.error && <p role="alert" className="text-xs text-red-600">{assignTripMutation.error.message}</p>}
           <AssignDriverPanel
             drivers={drivers}
             vehicles={vehicles}
             stops={stopsForAssignment}
-            onOptimize={() => {
+            onOptimize={API_DEMO_MODE ? () => {
               setSuccessToast('Route sequence re-optimized via OR-Tools CVRP solver.');
               setTimeout(() => setSuccessToast(null), 3000);
-            }}
+            } : undefined}
             onAssign={handleAssign}
-            isAssigning={assignTripMutation.isPending}
+            isAssigning={assignTripMutation.isPending || (!API_DEMO_MODE && !destination)}
           />
         </div>
       </div>

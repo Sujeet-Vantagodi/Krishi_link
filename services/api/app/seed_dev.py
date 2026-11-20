@@ -70,20 +70,28 @@ def seed() -> dict[str, str]:
         city_b = hub("Electronic City Distribution Hub", HubType.CITY, 12.8452, 77.6602, "Electronic City, Bengaluru", central.id)
 
         crops = []
-        for slug, en, kn, minimum in [("demo-tomato", "Tomato", "ಟೊಮೇಟೊ", 5), ("demo-onion", "Onion", "ಈರುಳ್ಳಿ", 10), ("demo-ragi", "Ragi", "ರಾಗಿ", 5)]:
+        for slug, en, kn, minimum, category, shelf_hours in [
+            ("demo-tomato", "Tomato", "ಟೊಮೇಟೊ", 5, "fruit_veg", 96),
+            ("demo-onion", "Onion", "ಈರುಳ್ಳಿ", 10, "roots", 336),
+            ("demo-ragi", "Ragi", "ರಾಗಿ", 5, "fruit_veg", 720),
+        ]:
             crop = db.scalar(select(Crop).where(Crop.slug == slug))
             if crop is None:
-                crop = Crop(slug=slug, name_en=en, name_kn=kn, category="fruit_veg", min_order_kg=1, default_min_kg=minimum, active=True)
+                crop = Crop(
+                    slug=slug, name_en=en, name_kn=kn, category=category,
+                    shelf_life_hours=shelf_hours, min_order_kg=1, default_min_kg=minimum, active=True,
+                )
                 db.add(crop)
                 db.flush()
             crops.append(crop)
-            if db.scalar(select(PublishedPrice).where(PublishedPrice.date == today, PublishedPrice.crop_id == crop.id)) is None:
-                db.add(PublishedPrice(date=today, crop_id=crop.id, low=20, high=40, reference=30, published_by=users[UserRole.ADMIN][0].id))
+            for quote_day in (today, today + timedelta(days=1)):
+                if db.scalar(select(PublishedPrice).where(PublishedPrice.date == quote_day, PublishedPrice.crop_id == crop.id)) is None:
+                    db.add(PublishedPrice(date=quote_day, crop_id=crop.id, low=20, high=40, reference=30, published_by=users[UserRole.ADMIN][0].id))
 
         farmers, buyers, drivers = users[UserRole.FARMER], users[UserRole.BUYER], users[UserRole.DRIVER]
         for i, farmer_user in enumerate(farmers):
             if db.get(Farmer, farmer_user.id) is None:
-                db.add(Farmer(user_id=farmer_user.id, village=["Vemgal", "Nandi", "Devanahalli"][i], taluk=["Kolar", "Chikkaballapur", "Devanahalli"][i], district="Karnataka", nearest_hub_id=[village_a.id, village_b.id, village_a.id][i], default_min_kg=5, approved=True))
+                db.add(Farmer(user_id=farmer_user.id, village=["Vemgal", "Nandi", "Devanahalli"][i], taluk=["Kolar", "Chikkaballapur", "Devanahalli"][i], district="Karnataka", nearest_hub_id=[village_a.id, village_b.id, village_a.id][i], location=[village_a.location, village_b.location, village_a.location][i], default_min_kg=5, approved=True))
             listing = db.scalar(select(FarmerListing).where(FarmerListing.farmer_id == farmer_user.id, FarmerListing.crop_id == crops[i].id, FarmerListing.listing_date == today))
             if listing is None:
                 db.add(FarmerListing(farmer_id=farmer_user.id, crop_id=crops[i].id, listing_date=today, est_kg=75 + i * 10, status=ListingStatus.ELIGIBLE, min_kg_applied=5))

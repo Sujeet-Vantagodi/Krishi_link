@@ -1,4 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { API_DEMO_MODE, requestApi } from '../../lib/api/client';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useHubDetail, useStockMatrix } from '../../features/hubs/hooks';
 import { useAdminTrips } from '../../features/trips/hooks';
@@ -13,13 +15,31 @@ export const HubDetail: React.FC = () => {
   const navigate = useNavigate();
   const { data: hub, isLoading: hubLoading } = useHubDetail(id || '');
   const { data: matrixData } = useStockMatrix();
-  const { data: trips = [] } = useAdminTrips();
+  const { data: trips = [] } = useAdminTrips(API_DEMO_MODE);
+  const queries = useQueryClient();
+  const [tripId, setTripId] = useState('');
+  const [cropId, setCropId] = useState('');
+  const inbound = useQuery({
+    queryKey: ['hub-inbound', id],
+    enabled: !!id && !API_DEMO_MODE,
+    queryFn: () => requestApi<{ items: { id: string; type: string; status: string; crops: Record<string, string> }[] }>(`/hubs/${id}/inbound-trips`),
+  });
+  const weighIn = useMutation({
+    mutationFn: (weights: Record<string, number>) => requestApi(
+      `/admin/trips/${tripId}/hub-receive?hub_id=${id}`, 'POST', { crop_id: cropId, ...weights },
+    ),
+    onSuccess: () => {
+      setCropId('');
+      void queries.invalidateQueries({ queryKey: ['hub-inbound', id] });
+      void queries.invalidateQueries({ queryKey: ['stock_matrix'] });
+    },
+  });
 
   if (hubLoading || !hub) {
     return <TableSkeleton rows={4} />;
   }
 
-  const hubTrips = trips.filter((t) => t.hub_id === hub.id);
+  const tripCount = API_DEMO_MODE ? trips.filter((trip) => trip.hub_id === hub.id).length : inbound.data?.items.length;
 
   return (
     <div className="space-y-6">
@@ -59,7 +79,7 @@ export const HubDetail: React.FC = () => {
         </div>
         <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
           <span className="text-xs text-slate-400 font-bold uppercase">Scheduled Trips</span>
-          <p className="text-base font-black text-blue-600 mt-1">{hubTrips.length} Trips</p>
+          <p className="text-base font-black text-blue-600 mt-1">{tripCount == null ? 'Unavailable' : `${tripCount} Trips`}</p>
         </div>
       </div>
 
@@ -69,6 +89,39 @@ export const HubDetail: React.FC = () => {
       </div>
 
       {/* Stock Status for this hub */}
+      {!API_DEMO_MODE && (
+        <form className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-4" onSubmit={(event) => {
+          event.preventDefault();
+          const fields = new FormData(event.currentTarget);
+          weighIn.mutate(Object.fromEntries(['kg_hub', 'grade_a_kg', 'grade_b_kg', 'reject_kg'].map((key) => [key, Number(fields.get(key))])));
+        }}>
+          <h3 className="text-base font-black text-slate-900 dark:text-white">Inbound Pickup Receipt</h3>
+          <label className="block text-xs font-bold text-slate-500">Inbound trip
+            <select className="w-full rounded-xl border border-slate-200 p-2.5 dark:bg-slate-800" value={tripId} onChange={(event) => { setTripId(event.target.value); setCropId(''); weighIn.reset(); }} required>
+              <option value="">Select an arrived pickup trip</option>
+              {inbound.data?.items.filter((trip) => trip.type === 'FIRST_MILE' && trip.status === 'AT_HUB' && Object.keys(trip.crops).length).map((trip) => (
+                <option key={trip.id} value={trip.id}>{trip.id}</option>
+              ))}
+            </select>
+          </label>
+          <label className="block text-xs font-bold text-slate-500">Crop
+            <select className="w-full rounded-xl border border-slate-200 p-2.5 dark:bg-slate-800" value={cropId} onChange={(event) => setCropId(event.target.value)} required>
+              <option value="">Select crop</option>
+              {Object.entries(inbound.data?.items.find((trip) => trip.id === tripId)?.crops ?? {}).map(([key, name]) => <option key={key} value={key}>{name}</option>)}
+            </select>
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            {Object.entries({ kg_hub: 'Measured total (kg)', grade_a_kg: 'Grade A (kg)', grade_b_kg: 'Grade B (kg)', reject_kg: 'Rejected (kg)' }).map(([key, label]) => (
+              <label key={key} className="text-xs font-bold text-slate-500">{label}
+                <input name={key} type="number" min={key === 'kg_hub' ? '0.001' : '0'} step="0.001" required className="w-full rounded-xl border border-slate-200 p-2.5 dark:bg-slate-800" />
+              </label>
+            ))}
+          </div>
+          {(inbound.error || weighIn.error) && <p role="alert" className="text-xs text-red-600">{(inbound.error || weighIn.error)?.message}</p>}
+          {weighIn.isSuccess && <p role="status" className="text-xs text-emerald-600">Hub receipt recorded.</p>}
+          <Button type="submit" disabled={!tripId || !cropId || weighIn.isPending}>Record Hub Receipt</Button>
+        </form>
+      )}
       {matrixData && (
         <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-4">
           <h3 className="text-base font-black text-slate-900 dark:text-white">

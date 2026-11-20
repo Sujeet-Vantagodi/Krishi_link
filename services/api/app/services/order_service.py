@@ -2,7 +2,7 @@ import uuid
 import hashlib
 import hmac
 import secrets
-from datetime import date, datetime, timezone, timedelta
+from datetime import date, datetime, time, timezone, timedelta
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -13,7 +13,8 @@ from app.models.crop import Crop
 from app.models.hub import Hub
 from app.models.pricing import PublishedPrice
 from app.models.stock import StockLedger
-from app.models.enums import OrderStatus, PaymentMode, LedgerReason, StopStatus, UserRole
+from app.models.payment import Payment
+from app.models.enums import OrderStatus, PaymentDirection, PaymentMode, PaymentStatus, LedgerReason, StopStatus, UserRole
 from app.models.trip import Trip, TripStop
 from app.models.user import User
 from app.schemas.order import OrderCreate, DeliveryItemReport
@@ -41,17 +42,16 @@ def create_buyer_order(
     db: Session,
     buyer_id: uuid.UUID,
     data: OrderCreate,
-    idempotency_key: Optional[str] = None
+    idempotency_key: Optional[str] = None,
+    *,
+    checkout_quote_date: date | None = None,
 ) -> Order:
     # 1. Idempotency check
     if idempotency_key:
         existing = db.query(Order).filter(Order.idempotency_key == idempotency_key).with_for_update().first()
         if existing:
-            if existing.status != OrderStatus.DELIVERED:
-                code = _new_delivery_code()
-                existing.delivery_code_hash = _delivery_code_hash(code)
-                existing.delivery_code = code
-                db.commit()
+            if existing.buyer_id != buyer_id:
+                raise ConflictException("Idempotency key is not available")
             return existing
 
     buyer = db.query(Buyer).filter(Buyer.user_id == buyer_id).first()
@@ -70,12 +70,12 @@ def create_buyer_order(
     # 2. Cutoff validation for next-day orders
     if data.delivery_date > today:
         now_utc = datetime.now(timezone.utc)
-        # Order cutoff is D-1 20:00 IST (UTC 14:30)
-        cutoff_dt = datetime(
-            data.delivery_date.year, data.delivery_date.month, data.delivery_date.day,
-            14, 30, tzinfo=timezone.utc
-        ) - timedelta(days=1)
-        if now_utc > cutoff_dt:
+        cutoff_dt = datetime.combine(
+            data.delivery_date - timedelta(days=1),
+            time(settings.ORDER_CUTOFF_HOUR_IST),
+            tzinfo=timezone(timedelta(hours=5, minutes=30)),
+        )
+        if now_utc >= cutoff_dt:
             raise CutoffPassedException(
                 cutoff_time=f"D-1 {settings.ORDER_CUTOFF_HOUR_IST}:00 IST",
                 action="placing next-day orders"
@@ -117,7 +117,13 @@ def create_buyer_order(
                     requested_kg=item_data.qty_kg
                 )
 
-        price_locked = get_locked_price_paise(db, crop.id, data.delivery_date)
+        if checkout_quote_date is None:
+            price_locked = get_locked_price_paise(db, crop.id, data.delivery_date)
+        else:
+            published = db.query(PublishedPrice).filter_by(crop_id=crop.id, date=checkout_quote_date).first()
+            if not published or published.reference <= 0:
+                raise ConflictException(f"No published price is available for {crop.name_en}")
+            price_locked = int(round(published.reference * 100))
         item_subtotal = int(round(price_locked * item_data.qty_kg))
         subtotal_paise += item_subtotal
         total_qty += item_data.qty_kg
@@ -126,7 +132,7 @@ def create_buyer_order(
             order_id=order_id,
             crop_id=crop.id,
             qty_kg=item_data.qty_kg,
-            confirmed_kg=item_data.qty_kg,
+            confirmed_kg=0 if checkout_quote_date is not None and not is_same_day else item_data.qty_kg,
             price_per_kg_locked=price_locked
         )
         order_items.append(order_item)
@@ -149,6 +155,7 @@ def create_buyer_order(
         delivery_fee=delivery_fee_paise,
         total=total_paise,
         payment_mode=data.payment_mode,
+        delivery_address=data.delivery_address,
         idempotency_key=idempotency_key
     )
     delivery_code = _new_delivery_code()
@@ -156,6 +163,9 @@ def create_buyer_order(
     order.delivery_code = delivery_code
 
     db.add(order)
+    if checkout_quote_date is not None:
+        db.add(Payment(party_id=buyer_id, direction=PaymentDirection.IN, amount=total_paise,
+                       status=PaymentStatus.PENDING, order_id=order_id))
     for oi in order_items:
         db.add(oi)
 
@@ -179,6 +189,8 @@ def create_buyer_order(
         if idempotency_key:
             existing = db.query(Order).filter(Order.idempotency_key == idempotency_key).first()
             if existing:
+                if existing.buyer_id != buyer_id:
+                    raise ConflictException("Idempotency key is not available")
                 return existing
         raise
     db.refresh(order)

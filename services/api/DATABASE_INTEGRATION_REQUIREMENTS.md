@@ -1,0 +1,41 @@
+# Database integration requirements
+
+## Final browser logistics continuation
+
+- No migration is added in this continuation. The browser logistics workflow uses the existing API-owned users, farmers, trips, stops, receipts, published prices and inventory ledger. Prior API migrations through `0005_order_address` remain prerequisites for existing deployments.
+- An eligible pickup requires a persisted farm location. Browser arrival supplies device coordinates for the geofence. Development seed coordinates and published prices are fixture data used only in the gated SQLite demo setup.
+- A hub receipt requires a completed, confirmed pickup for that crop. The measured grade breakdown drives accepted stock. A transfer receives only after its assigned trip reaches the destination. It debits the source by sent weight and credits the destination by received weight.
+- Production device telemetry and a verified payment/payout provider are external dependencies. Existing production schema rollout and historical reconciliation remain unverified.
+
+## Core logistics continuation
+
+- API migration `0005_order_address` adds nullable `orders.delivery_address`. New buyer checkout stores the address snapshot. Legacy values remain null until a reliable source is available. Delivery geocoding and the verified payment-provider callback are still separate dependencies.
+- Only accepted A/B kilograms now enter saleable hub stock. Historical ledger entries are preserved. The database team should review historical hub receipts with rejects before production availability is computed from a mixed ledger.
+- Settlement reconciliation uses the hub split for one confirmed farmer where accepted weight is within the verified pickup total. For mixed loads it uses per-farmer pickup allocations only when both grade totals match. Discrepancies stay out of settlement calculations until per-farmer reweigh evidence or an approved allocation policy exists. Review prior DRAFT rows before payment approval.
+- Transfer assignment uses the existing transfer-to-trip relationship. Assignment, sent weight and received weight come from persisted inputs. No changes to the teammate-owned schema or data were made. PostgreSQL migration application remains unverified.
+
+## Continuation migrations
+
+- API-owned Alembic revision `0003_password_credentials` adds a one-to-one table referencing `users.id`. It stores a salted scrypt verifier and optional contact email. Existing users have no password until provisioned. The API never reads or imports the teammate credential store. Compare normalized phone identities and UUID ownership before migrating any credentials.
+- Revision `0004_transfer_urgency` adds `transfer_requests.urgency` with `NORMAL` as the default for new and existing requests. Existing assignments, weights, stock and statuses are preserved.
+- Fresh SQLite databases created by FastAPI include both changes. Apply Alembic to an API-owned PostgreSQL database after reviewing the prior schema. An existing SQLite database initialized through `create_all` needs an explicit schema upgrade or a fresh isolated demo database. Back up and coordinate any database with existing data.
+- Buyer checkout still needs an immutable per-order delivery address, a current requested date, and reconciliation against a payment provider. The existing form sends the fixed date `2026-11-20`. Transfer dispatch and receipt require actual trip assignment and measured weights. Hub reconciliation for settlement needs a policy for allocating mismatched aggregate weights to farmers.
+
+The FastAPI routers in `app/main.py` use `app/database.py` and the ORM under `app/models/`. The separate `database/connection.py`, `database/models.py`, SQLite file and `database/01_schema.sql` have a separate setup path. Treat those as teammate-owned. Coordinate the canonical schema and migration order before pointing the API at their data. The integration checks use isolated SQLite. PostgreSQL and PostGIS compatibility remain unverified.
+
+| Feature and severity | Frontend contract | API ORM and teammate definition | Required owner action |
+| --- | --- | --- | --- |
+| Password authentication, critical | Phone and password for login, public registration with optional email and role-specific fields | API `User` has unique phone and role but no credential or email columns. Teammate `database/models.py` defines email and a non-null password hash. | Database and auth owners agree on one identity table. Specify nullable password hashes for OTP-only identities, normalized unique identifiers, verified ownership and legacy hash compatibility. Reconcile existing UUIDs and profile foreign keys before adding secure password login. |
+| Refresh/logout, high | Persistent authenticated session that can be revoked | Current JWT refresh is stateless and logout has no server-side revocation. | Auth owner chooses a persisted session or token-family store with rotation/revocation and expiry. Establish which existing sessions must remain valid. |
+| Catalog, high | Displayable crop category, shelf life, current price and stock | API `Crop.shelf_life_hours` and category are nullable. API `PublishedPrice` is date-keyed. Teammate SQL uses `roots`, while API test data also uses `root`. Stock balance comes from the API ledger. | Catalog owner backfills accurate metadata and publishes price bands. Confirm enum mapping and which hub serves each buyer. Confirm balances and the migration treatment of historical ledger entries. |
+| Checkout and tracking, high | Order address and location, per-crop allocation, payment status, delivery slot and tracking | API order stores delivery hub and window, but address/location is on the buyer profile. API order payment mode does not provide verified payment status. | Store immutable per-order delivery address and geocoded coordinates when available. Agree on payment-intent reconciliation and order payment state. Decide the authoritative order pricing date and remove legacy baseline price behavior before wiring checkout. |
+| Driver itinerary and receipts, high | Ordered stops with real coordinates, names/addresses, ETA, receipt lines and measured weights | API `TripStop` has foreign keys and nullable geolocation/ETA, and `PickupReceipt` has an idempotency key. Some stop display data must be joined from the order, farmer or hub. | Confirm driver/vehicle/hub assignments and authoritative stop location source, plan route vs telemetry semantics, and define a batch receipt transaction with idempotency and confirmation evidence. |
+| Transfer, high | Urgency, approval time, driver/vehicle and measured received weight | API `TransferRequest` has requested/sent/received weights, trip and approving user. No urgency field in the API mapping. | Agree on persisted urgency and approval timestamp, or confirm an authoritative existing source. Approve assignment and physical receive inputs with operations before wiring status buttons. |
+| Inventory and settlements, high | Exact stock and verified farmer settlement details | API has `HubReceipt`, append-only `StockLedger`, and settlement amounts separate from payment execution. | Reconcile receipt and lot keys between the two schema entry points. Validate hub ownership and the approved receipt-to-ledger-to-settlement lineage on PostgreSQL. Record actual payout provider confirmations before changing paid status. |
+| Forecasting, external | Price and demand forecast rows with model values | A published price is a business record and does not imply a forecast result. | Identify the running model service or agreed forecast import contract with observation times and provenance. Keep unavailable forecast and payout workflows explicit until providers are configured. |
+
+## Verification boundaries
+
+- Alembic migrations `0001_initial_schema.py` and `0002_operational_integrity.py` are the FastAPI migration path. Apply them only to an isolated database pending DBA review of existing tables and enums.
+- `app/models/types.py` stores SQLite coordinates as WKT and expects a compatible PostgreSQL geography representation on reads. Confirm PostGIS round-trip decoding with real data before enabling tracking routes.
+- No schema, seed or database files under the top-level `database/` were edited.

@@ -26,6 +26,14 @@ class User(Base, TimestampMixin):
     driver_profile: Mapped[Optional["Driver"]] = relationship("Driver", back_populates="user", uselist=False, cascade="all, delete-orphan")
 
 
+class PasswordCredential(Base):
+    __tablename__ = "password_credentials"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    password_hash: Mapped[str] = mapped_column(String(200), nullable=False)
+    contact_email: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+
+
 class Farmer(Base):
     __tablename__ = "farmers"
 

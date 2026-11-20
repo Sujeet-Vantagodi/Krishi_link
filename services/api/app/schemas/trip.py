@@ -32,6 +32,11 @@ class TripStopOut(BaseModel):
     completed_at: Optional[datetime] = None
     skip_reason: Optional[str] = None
     order_items: List[DeliveryItemExpected] = []
+    crop_id: Optional[uuid.UUID] = None
+    name: Optional[str] = None
+    address: Optional[str] = None
+    expected_kg: Optional[float] = None
+    receipt_lines: list[dict] = Field(default_factory=list)
 
 
 # ─── Trip Summary ─────────────────────────────────────────────────────────────
@@ -57,6 +62,9 @@ class TripSummary(BaseModel):
 
 class TripDetail(TripSummary):
     stops: List[TripStopOut] = []
+    vehicle: Optional[dict] = None
+    origin: Optional[dict] = None
+    destination: Optional[dict] = None
 
 
 # ─── Admin Assign ─────────────────────────────────────────────────────────────
@@ -86,13 +94,14 @@ class DriverAvailableOut(BaseModel):
     vehicle_reg: Optional[str] = None
     vehicle_capacity_kg: Optional[float] = None
     active_trips: int = 0
+    vehicle: Optional[dict] = None
 
 
 # ─── Stop Actions ─────────────────────────────────────────────────────────────
 
 class ArriveStopIn(BaseModel):
-    lat: float
-    lng: float
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
     admin_override: bool = False
     override_reason: Optional[str] = None
 

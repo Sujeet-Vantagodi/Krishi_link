@@ -1,3 +1,4 @@
+import { API_DEMO_MODE } from '../../lib/api/client';
 import React, { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useOrderTracking } from '../../features/tracking/hooks';
@@ -15,29 +16,31 @@ export const OrderTracking: React.FC = () => {
   const navigate = useNavigate();
   const { t } = useTranslation();
 
-  const { data: tracking, isLoading, refetch } = useOrderTracking(id || 'order_101');
+  const { data: tracking, isLoading, error } = useOrderTracking(id || '');
   const [liveLocation, setLiveLocation] = useState<any>(null);
   const [liveEta, setLiveEta] = useState<number | null>(null);
   const [issueDialogOpen, setIssueDialogOpen] = useState(false);
   const [issueReported, setIssueReported] = useState(false);
 
   // Subscribe to realtime trip updates
-  useChannel(tracking?.trip_id ? `trip:${tracking.trip_id}` : null, (msg) => {
+  useChannel(API_DEMO_MODE && tracking?.trip_id ? `trip:${tracking.trip_id}` : null, (msg) => {
     if (msg.event === 'location' && msg.data?.location) {
       setLiveLocation(msg.data.location);
       if (msg.data.eta_minutes !== undefined) setLiveEta(msg.data.eta_minutes);
     }
   });
 
+  if (error) return <p role="alert" className="p-8 text-center text-slate-500">{error.message}</p>;
+
   if (isLoading || !tracking) {
     return <div className="p-8 text-center text-slate-500">{t('common.loading')}</div>;
   }
 
   const activeVehicleLocation = liveLocation || tracking.vehicle;
-  const etaMinutes = liveEta ?? tracking.eta_minutes ?? 14;
+  const etaMinutes = liveEta ?? tracking.eta_minutes;
 
   const steps = [
-    { label: t('buyer.driverAssigned'), done: true },
+    { label: t('buyer.driverAssigned'), done: Boolean(tracking.driver) },
     { label: t('buyer.driverOnTheWay'), done: tracking.status === 'OUT_FOR_DELIVERY' || tracking.status === 'DELIVERED', active: tracking.status === 'OUT_FOR_DELIVERY' },
     { label: t('buyer.delivered'), done: tracking.status === 'DELIVERED' },
   ];
@@ -60,26 +63,26 @@ export const OrderTracking: React.FC = () => {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-xl font-black text-slate-900 dark:text-white">Live Tracking</h2>
-          <p className="text-xs text-slate-500 mt-0.5">Direct transport from HSR Layout Mini Hub</p>
+          <p className="text-xs text-slate-500 mt-0.5">{tracking.status}</p>
         </div>
-        <EtaBadge minutes={etaMinutes} />
+        {etaMinutes == null ? <span className="text-xs text-slate-500">ETA unavailable</span> : <EtaBadge minutes={etaMinutes} />}
       </div>
 
       {/* Live Map Display */}
       <div className="rounded-3xl overflow-hidden shadow-md border border-slate-200 dark:border-slate-800">
-        <LiveMap
-          center={activeVehicleLocation}
+        {activeVehicleLocation || tracking.destination ? <LiveMap
+          center={(activeVehicleLocation || tracking.destination)!}
           zoom={13}
-          vehicles={[
+          vehicles={activeVehicleLocation ? [
             {
               id: 'v_delivery',
               name: tracking.driver?.name,
               location: activeVehicleLocation,
               speed_kmh: activeVehicleLocation.speed_kmh,
-              eta_minutes: etaMinutes,
+              eta_minutes: etaMinutes ?? undefined,
             },
-          ]}
-          stops={[
+          ] : []}
+          stops={tracking.destination ? [
             {
               id: 'dest',
               type: 'DELIVERY',
@@ -87,11 +90,11 @@ export const OrderTracking: React.FC = () => {
               location: tracking.destination,
               status: 'EN_ROUTE',
             },
-          ]}
+          ] : []}
           routePolyline={tracking.route_polyline}
           followVehicle={true}
           className="h-72 w-full"
-        />
+        /> : <p className="h-72 grid place-items-center text-xs text-slate-500">GPS unavailable</p>}
       </div>
 
       {/* Delivery Driver Info & Masked Call Button */}
@@ -102,10 +105,10 @@ export const OrderTracking: React.FC = () => {
           </div>
           <div>
             <h4 className="font-bold text-sm text-slate-900 dark:text-white">
-              {tracking.driver?.name || 'Suresh Kumar'}
+              {tracking.driver?.name || 'Driver unavailable'}
             </h4>
             <p className="text-xs text-slate-500 font-mono mt-0.5">
-              Vehicle: {tracking.driver?.vehicle_no || 'KA 03 D 9012'}
+              Vehicle: {tracking.driver?.vehicle_no || 'Unavailable'}
             </p>
           </div>
         </div>
@@ -126,7 +129,7 @@ export const OrderTracking: React.FC = () => {
           Delivery Verification OTP
         </span>
         <p className="text-3xl font-black text-blue-900 dark:text-blue-100 tracking-widest font-mono">
-          {tracking.delivery_otp || '4829'}
+          {tracking.delivery_otp || 'Unavailable'}
         </p>
         <p className="text-[11px] text-blue-600 dark:text-blue-400">
           Driver will request this 4-digit OTP upon unloading produce
@@ -161,12 +164,12 @@ export const OrderTracking: React.FC = () => {
       </div>
 
       {/* Report Issue Action */}
-      <button
+      {API_DEMO_MODE && <button
         onClick={() => setIssueDialogOpen(true)}
         className="text-xs text-center text-slate-500 hover:text-red-500 font-semibold py-2 underline"
       >
         {t('buyer.reportIssue')}
-      </button>
+      </button>}
 
       {/* Report Issue Dialog */}
       <Dialog open={issueDialogOpen} onOpenChange={setIssueDialogOpen}>

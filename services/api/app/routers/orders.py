@@ -6,17 +6,82 @@ from app.database import get_db
 from app.models.user import User
 from app.models.order import Order, OrderItem
 from app.models.crop import Crop
-from app.models.trip import Trip, TripStop
-from app.models.enums import UserRole, OrderStatus, TripStatus
+from app.models.trip import LocationPing, Trip, TripStop
+from app.models.base import utc_now
+from datetime import date, time, timedelta, timezone
+from math import ceil
+from app.config import settings
+from app.models.enums import UserRole, OrderStatus, TripStatus, PaymentDirection, PaymentMode, PaymentStatus
+from app.models.payment import Payment
 from app.schemas.order import (
     OrderCreate, OrderResponse, OrderItemResponse,
-    OrderTrackingResponse, ConfirmDeliveryRequest
+    OrderTrackingResponse, ConfirmDeliveryRequest, CheckoutRequest, BuyerOrderHistory, BuyerOrderResponse
 )
 from app.core.dependencies import require_roles, get_current_user
 from app.core.exceptions import NotFoundException, ForbiddenException, CutoffPassedException
 from app.services.order_service import create_buyer_order, confirm_order_delivery
 
 router = APIRouter(prefix="", tags=["Orders"])
+
+
+def buyer_order_response(db: Session, order: Order) -> BuyerOrderResponse:
+    payment = (db.query(Payment).filter_by(order_id=order.id, party_id=order.buyer_id, direction=PaymentDirection.IN)
+               .order_by(Payment.created_at.desc()).first())
+    window = ""
+    if order.slot_start and order.slot_end:
+        window = f"{order.slot_start:%H:%M}-{order.slot_end:%H:%M}"
+    return BuyerOrderResponse(
+        **OrderResponse.model_validate(order).model_dump(exclude={"delivery_code"}),
+        delivery_code=getattr(order, "delivery_code", None),
+        slot=window,
+        address=order.delivery_address or "Address not recorded",
+        payment_status=payment.status if payment else PaymentStatus.PENDING,
+    )
+
+
+@router.post("/orders/checkout", response_model=BuyerOrderResponse, status_code=201)
+def checkout_order(
+    data: CheckoutRequest,
+    current_user: User = Depends(require_roles(UserRole.BUYER)),
+    db: Session = Depends(get_db),
+):
+    if data.payment_mode != PaymentMode.PREPAID:
+        raise ForbiddenException("Credit checkout requires verified account terms and balance")
+    now = utc_now().astimezone(timezone(timedelta(hours=5, minutes=30)))
+    day_offset = 1 if now.hour < settings.ORDER_CUTOFF_HOUR_IST else 2
+    start, end = map(time.fromisoformat, data.slot.split("-"))
+    order = create_buyer_order(
+        db, current_user.id,
+        OrderCreate(delivery_date=now.date() + timedelta(days=day_offset), slot_start=start, slot_end=end,
+                    items=data.items, payment_mode=data.payment_mode, delivery_address=data.address.strip()),
+        checkout_quote_date=date.today(),
+    )
+    return buyer_order_response(db, order)
+
+
+@router.get("/orders/history", response_model=BuyerOrderHistory)
+def buyer_order_history(
+    status_filter: Optional[OrderStatus] = Query(None, alias="status"),
+    current_user: User = Depends(require_roles(UserRole.BUYER)),
+    db: Session = Depends(get_db),
+):
+    query = db.query(Order).filter_by(buyer_id=current_user.id)
+    if status_filter is not None:
+        query = query.filter_by(status=status_filter)
+    return BuyerOrderHistory(items=[buyer_order_response(db, order)
+                                    for order in query.order_by(Order.created_at.desc()).all()])
+
+
+@router.get("/orders/history/{id}", response_model=BuyerOrderResponse)
+def buyer_order_detail(
+    id: uuid.UUID,
+    current_user: User = Depends(require_roles(UserRole.BUYER)),
+    db: Session = Depends(get_db),
+):
+    order = db.query(Order).filter_by(id=id, buyer_id=current_user.id).first()
+    if not order:
+        raise NotFoundException("Order", id)
+    return buyer_order_response(db, order)
 
 
 @router.post("/orders", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
@@ -166,7 +231,9 @@ def api_track_order(
     if current_user.role == UserRole.BUYER and order.buyer_id != current_user.id:
         raise ForbiddenException("Access to this order tracking is forbidden")
 
-    stop = db.query(TripStop).join(Trip).filter(TripStop.buyer_order_id == id).first()
+    stop = (db.query(TripStop).join(Trip).filter(
+        TripStop.buyer_order_id == id, Trip.status != TripStatus.CANCELLED,
+    ).order_by(Trip.created_at.desc()).first())
     driver_info = None
     vehicle_info = None
     eta_mins = None
@@ -175,23 +242,32 @@ def api_track_order(
         trip = stop.trip
         if trip.driver and trip.driver.user:
             driver_info = {
-                "name": trip.driver.user.name or "Assigned Driver",
-                "phone": trip.driver.user.phone
+                "name": trip.driver.user.name,
+                "phone": trip.driver.user.phone,
+                "vehicle_no": trip.vehicle.reg_no if trip.vehicle else None,
             }
-        if trip.vehicle:
+        ping = (db.query(LocationPing).filter_by(trip_id=trip.id, driver_id=trip.driver_id)
+                .order_by(LocationPing.ts.desc()).first())
+        if ping and ping.location and {"lat", "lng"} <= ping.location.keys():
             vehicle_info = {
-                "reg_no": trip.vehicle.reg_no,
-                "lat": 12.9131,
-                "lng": 77.6101,
-                "heading": 90
+                "lat": ping.location["lat"],
+                "lng": ping.location["lng"],
+                "heading": ping.heading,
+                "speed_kmh": ping.speed_kmh,
+                "updated_at": ping.ts,
             }
-        eta_mins = 15
+        if stop.eta and order.status == OrderStatus.OUT_FOR_DELIVERY:
+            eta = stop.eta if stop.eta.tzinfo else stop.eta.replace(tzinfo=timezone.utc)
+            remaining = (eta - utc_now()).total_seconds()
+            eta_mins = ceil(remaining / 60) if remaining >= 0 else None
 
     return OrderTrackingResponse(
         order_id=order.id,
         status=order.status,
+        trip_id=stop.trip_id if stop else None,
         driver=driver_info,
         vehicle=vehicle_info,
+        destination=stop.location if stop and stop.location and {"lat", "lng"} <= stop.location.keys() else None,
         eta_minutes=eta_mins
     )
 

@@ -1,3 +1,4 @@
+import { API_DEMO_MODE } from '../../lib/api/client';
 import React, { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
@@ -20,7 +21,7 @@ export const DriverTrip: React.FC = () => {
   const navigate = useNavigate();
   const { t } = useTranslation();
 
-  const { data: trip, isLoading, refetch } = useDriverTrip(id || '');
+  const { data: trip, isLoading, error } = useDriverTrip(id || '');
   const startTripMutation = useStartTrip();
   const arriveAtStopMutation = useArriveAtStop();
   const reachedHubMutation = useReachedHub();
@@ -31,11 +32,13 @@ export const DriverTrip: React.FC = () => {
   const [liveLocation, setLiveLocation] = useState<any>(null);
 
   // Subscribe to real-time location & status updates
-  useChannel(id ? `trip:${id}` : null, (msg) => {
+  useChannel(API_DEMO_MODE && id ? `trip:${id}` : null, (msg) => {
     if (msg.event === 'location' && msg.data?.location) {
       setLiveLocation(msg.data.location);
     }
   });
+
+  if (error) return <p role="alert" className="p-8 text-center text-slate-500">{error.message}</p>;
 
   if (isLoading || !trip) {
     return <div className="p-8 text-center text-slate-400">Loading trip itinerary...</div>;
@@ -51,7 +54,10 @@ export const DriverTrip: React.FC = () => {
   const activeIndex = trip.stops.findIndex((s) => s.id === activeStop?.id);
   const isLastStop = activeIndex === trip.stops.length - 1;
 
-  const currentVehicleLoc = liveLocation || trip.current_location || trip.stops[0].location;
+  const currentVehicleLoc = liveLocation || trip.current_location || (API_DEMO_MODE ? trip.stops[0]?.location : undefined);
+
+  const mapCenter = currentVehicleLoc || trip.stops.find((stop) => stop.location)?.location;
+  const actionError = startTripMutation.error || arriveAtStopMutation.error || reachedHubMutation.error || returnTripMutation.error;
 
   return (
     <div className="flex flex-col h-[calc(100vh-64px)] relative bg-slate-100">
@@ -90,10 +96,10 @@ export const DriverTrip: React.FC = () => {
 
       {/* Full-screen Leaflet Map */}
       <div className="flex-1 w-full h-full relative">
-        <LiveMap
-          center={currentVehicleLoc}
+        {mapCenter ? <LiveMap
+          center={mapCenter}
           zoom={12}
-          vehicles={[
+          vehicles={currentVehicleLoc ? [
             {
               id: trip.vehicle_id,
               name: trip.driver?.name,
@@ -101,8 +107,8 @@ export const DriverTrip: React.FC = () => {
               speed_kmh: currentVehicleLoc.speed_kmh,
               eta_minutes: trip.eta_minutes,
             },
-          ]}
-          stops={trip.stops.map((s) => ({
+          ] : []}
+          stops={trip.stops.filter((stop) => stop.location).map((s) => ({
             id: s.id,
             seq: s.seq,
             type: s.type,
@@ -116,11 +122,12 @@ export const DriverTrip: React.FC = () => {
           highlightId={activeStop?.id}
           followVehicle={followMode}
           className="h-full w-full rounded-none border-none"
-        />
+        /> : <p className="h-full grid place-items-center text-xs text-slate-500">GPS unavailable</p>}
       </div>
 
       {/* Bottom Sheet Card with Active Stop & Big Status Actions */}
       <div className="z-20 bg-white border-t border-slate-200 p-4 rounded-t-3xl shadow-2xl space-y-3">
+        {actionError && <p role="alert" className="text-xs text-red-600">{actionError.message}</p>}
         {/* Next Stop Details Card */}
         {activeStop && (
           <StopCard
@@ -133,8 +140,8 @@ export const DriverTrip: React.FC = () => {
         {/* Big Sunlight-friendly Status Stepper Action */}
         <StatusStepper
           tripStatus={trip.status}
-          currentStopStatus={activeStop?.status}
-          isLastStop={isLastStop}
+          currentStopStatus={trip.type === 'TRANSFER' || activeStop?.status === 'SKIPPED' ? 'COMPLETED' : activeStop?.status}
+          isLastStop={trip.type === 'TRANSFER' || isLastStop}
           onStartTrip={() => startTripMutation.mutate(trip.id)}
           onArrive={() =>
             activeStop &&

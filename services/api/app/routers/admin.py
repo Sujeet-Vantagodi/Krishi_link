@@ -1,5 +1,5 @@
 import uuid
-from datetime import date
+from datetime import date, datetime
 from typing import Optional, Dict, Any
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
@@ -15,6 +15,7 @@ from app.models.payment import Settlement
 from app.models.platform import Setting
 from app.models.enums import UserRole, OrderStatus, ListingStatus, TripStatus
 from app.schemas.admin import AdminOverviewResponse, AdminSettingsResponse, AdminSettingsUpdate
+from app.schemas.settlement import SettlementResponse, SettlementsResponse
 from app.core.dependencies import require_roles
 from app.services.settlement_service import approve_settlement, calculate_settlements
 
@@ -22,23 +23,22 @@ router = APIRouter(prefix="/admin", tags=["Admin Control Tower"])
 
 
 def _settlement_out(s: Settlement) -> dict:
-    farmer = s.farmer.user
-    return {"id": str(s.id), "farmer_id": str(s.farmer_id), "farmer_name": farmer.name, "date": str(s.settle_date), "accepted_kg": float(s.accepted_kg), "gross_amount": s.gross, "commission_amount": s.commission, "logistics_share": s.logistics_share, "net_amount": s.net, "status": s.status, "paid_at": s.paid_at}
+    return SettlementResponse.from_record(s).model_dump(mode="json")
 
 
-@router.get("/settlements", response_model=dict)
+@router.get("/settlements", response_model=SettlementsResponse)
 def list_settlements(current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)), db: Session = Depends(get_db)):
     items = db.query(Settlement).order_by(Settlement.settle_date.desc()).all()
     return {"items": [_settlement_out(item) for item in items], "total": len(items)}
 
 
-@router.post("/settlements/calculate", response_model=dict)
+@router.post("/settlements/calculate", response_model=SettlementsResponse)
 def calculate_settlement_records(settle_date: date = Query(...), current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)), db: Session = Depends(get_db)):
     items = calculate_settlements(db, settle_date)
     return {"items": [_settlement_out(item) for item in items], "total": len(items)}
 
 
-@router.post("/settlements/{settlement_id}/approve", response_model=dict)
+@router.post("/settlements/{settlement_id}/approve", response_model=SettlementResponse)
 def approve_settlement_record(settlement_id: uuid.UUID, current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)), db: Session = Depends(get_db)):
     return _settlement_out(approve_settlement(db, settlement_id, current_user))
 
@@ -82,14 +82,15 @@ def api_admin_overview(
 def api_dispatch_pool(
     date: Optional[date] = Query(None),
     current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    upcoming: bool = False,
 ):
-    target_date = date or date.today()
+    target_date = date or datetime.now().date()
 
     # Eligible listings ready for collection
     listings = db.query(FarmerListing).filter(
-        FarmerListing.listing_date == target_date,
-        FarmerListing.status == ListingStatus.ELIGIBLE
+        FarmerListing.listing_date >= target_date if upcoming else FarmerListing.listing_date == target_date,
+        FarmerListing.status.in_([ListingStatus.ELIGIBLE, ListingStatus.INELIGIBLE]) if upcoming else FarmerListing.status == ListingStatus.ELIGIBLE,
     ).all()
 
     pickup_stops = []
@@ -99,6 +100,11 @@ def api_dispatch_pool(
         loc = farmer.location if farmer else {}
         pickup_stops.append({
             "listing_id": l.id,
+            "id": l.id,
+            "listing_date": l.listing_date,
+            "created_at": l.created_at,
+            "status": l.status,
+            "min_kg_applied": float(l.min_kg_applied) if l.min_kg_applied is not None else None,
             "farmer_id": l.farmer_id,
             "nearest_hub_id": farmer.nearest_hub_id if farmer else None,
             "crop_id": l.crop_id,

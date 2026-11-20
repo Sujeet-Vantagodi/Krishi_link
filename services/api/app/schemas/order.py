@@ -1,8 +1,8 @@
 import uuid
 from datetime import date, time, datetime
 from typing import Optional, List
-from pydantic import BaseModel, Field, ConfigDict
-from app.models.enums import OrderStatus, PaymentMode
+from pydantic import BaseModel, Field, ConfigDict, model_validator
+from app.models.enums import OrderStatus, PaymentMode, PaymentStatus
 
 
 class OrderItemCreate(BaseModel):
@@ -17,6 +17,29 @@ class OrderCreate(BaseModel):
     slot_end: Optional[time] = None
     payment_mode: PaymentMode = PaymentMode.PREPAID
     items: List[OrderItemCreate] = Field(..., min_length=1)
+    delivery_address: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def distinct_crops(self):
+        if len({item.crop_id for item in self.items}) != len(self.items):
+            raise ValueError("An order may contain each crop only once")
+        return self
+
+
+class CheckoutRequest(BaseModel):
+    slot: str = Field(pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]-(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
+    payment_mode: PaymentMode
+    items: list[OrderItemCreate] = Field(min_length=1)
+    address: str = Field(min_length=1, max_length=500, pattern=r"\S")
+
+    @model_validator(mode="after")
+    def valid_cart(self):
+        start, end = self.slot.split("-")
+        if start >= end:
+            raise ValueError("Delivery slot must end after it starts")
+        if len({item.crop_id for item in self.items}) != len(self.items):
+            raise ValueError("An order may contain each crop only once")
+        return self
 
 
 class OrderItemResponse(BaseModel):
@@ -53,9 +76,21 @@ class OrderResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class BuyerOrderResponse(OrderResponse):
+    address: str
+    slot: str
+    payment_status: PaymentStatus
+    location: dict | None = None
+
+
+class BuyerOrderHistory(BaseModel):
+    items: list[BuyerOrderResponse]
+
+
 class OrderTrackingResponse(BaseModel):
     order_id: uuid.UUID
     status: OrderStatus
+    trip_id: Optional[uuid.UUID] = None
     driver: Optional[dict] = None  # {"name": "...", "vehicle_no": "..."}
     vehicle: Optional[dict] = None  # {"lat": ..., "lng": ..., "heading": ...}
     destination: Optional[dict] = None

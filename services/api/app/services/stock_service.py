@@ -1,10 +1,11 @@
 import uuid
 from typing import List, Optional, Dict
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from app.models.stock import HubStockStatus, HubStockStatusHistory, StockLedger
 from app.models.hub import Hub
 from app.models.crop import Crop
+from app.models.base import utc_now
 from app.models.enums import StockStatus, LedgerReason
 from app.core.exceptions import NotFoundException
 
@@ -62,6 +63,7 @@ def update_hub_stock_status(
     else:
         record.status = status
         record.set_by = set_by_user_id
+        record.set_at = utc_now()
 
     # Record history audit
     history = HubStockStatusHistory(
@@ -102,22 +104,39 @@ def record_ledger_transaction(
     return ledger_entry
 
 
-def get_stock_matrix_data(db: Session) -> Dict:
+def get_stock_matrix_data(db: Session, hub_ids: set[uuid.UUID] | None = None) -> Dict:
     crops = db.query(Crop).filter(Crop.active == True).order_by(Crop.name_en).all()
-    hubs = db.query(Hub).filter(Hub.active == True).order_by(Hub.name).all()
+    hubs_query = db.query(Hub).filter(Hub.active.is_(True))
+    if hub_ids is not None:
+        hubs_query = hubs_query.filter(Hub.id.in_(hub_ids))
+    hubs = hubs_query.order_by(Hub.name).all()
+    visible_hub_ids = [hub.id for hub in hubs]
 
-    # Pre-fetch existing stock statuses
-    status_records = db.query(HubStockStatus).all()
+    status_records = db.query(HubStockStatus).options(joinedload(HubStockStatus.setter)).filter(
+        HubStockStatus.hub_id.in_(visible_hub_ids)
+    ).all()
     status_map = {(s.hub_id, s.crop_id): s for s in status_records}
+    balances = {
+        (hub_id, crop_id): kg
+        for hub_id, crop_id, kg in db.query(
+            StockLedger.hub_id, StockLedger.crop_id, func.sum(StockLedger.delta_kg)
+        ).filter(StockLedger.hub_id.in_(visible_hub_ids)).group_by(
+            StockLedger.hub_id, StockLedger.crop_id
+        ).all()
+    }
 
     hub_rows = []
     for h in hubs:
         cells = []
         for c in crops:
             s_rec = status_map.get((h.id, c.id))
-            status = s_rec.status if s_rec else StockStatus.OUT
-            suggested = s_rec.suggested if s_rec else None
-            set_by_name = str(s_rec.set_by) if s_rec and s_rec.set_by else None
+            balance = balances.get((h.id, c.id), 0)
+            measured_status = StockStatus.OUT
+            if balance > 0:
+                measured_status = StockStatus.LOW if balance < c.min_order_kg else StockStatus.SUFFICIENT
+            status = s_rec.status if s_rec else measured_status
+            suggested = s_rec.suggested if s_rec and s_rec.suggested else measured_status
+            set_by_name = s_rec.setter.name if s_rec and s_rec.setter else None
             set_at = s_rec.set_at if s_rec else None
 
             cells.append({
@@ -125,6 +144,7 @@ def get_stock_matrix_data(db: Session) -> Dict:
                 "crop_name": c.name_en,
                 "status": status,
                 "suggested": suggested,
+                "exact_kg": balance,
                 "set_by": set_by_name,
                 "set_at": set_at
             })

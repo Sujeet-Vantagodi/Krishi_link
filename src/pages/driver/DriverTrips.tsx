@@ -2,6 +2,7 @@ import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useDriverTrips, useAcknowledgeTrip } from '../../features/trips/hooks';
 import { useAuthStore } from '../../stores/authStore';
+import { API_DEMO_MODE } from '../../lib/api/client';
 import { TripStatusPill } from '../../components/trip/TripStatusPill';
 import { Button } from '../../components/ui/button';
 import { Truck, MapPin, Clock, ArrowRight, Check, Navigation, Building } from 'lucide-react';
@@ -35,8 +36,12 @@ export const DriverTrips: React.FC = () => {
           const isStarted = trip.status === 'STARTED';
 
           // Derive location summary
-          const originStop = trip.stops[0];
-          const destStop = trip.stops[trip.stops.length - 1];
+          const itinerary = trip as typeof trip & {
+            origin?: { name: string; address?: string };
+            destination?: { name: string; address?: string };
+          };
+          const originStop = API_DEMO_MODE ? trip.stops[0] : itinerary.origin ?? trip.stops[0];
+          const destStop = API_DEMO_MODE ? trip.stops[trip.stops.length - 1] : itinerary.destination;
           const pickupStops = trip.stops.filter((s) => s.type === 'PICKUP');
 
           return (
@@ -94,10 +99,10 @@ export const DriverTrips: React.FC = () => {
                     </span>
                     <div className="min-w-0">
                       <p className="font-bold text-slate-800 truncate">
-                        Origin: {originStop?.name || 'Village Mini Hub'}
+                        Origin: {originStop?.name || (API_DEMO_MODE ? 'Village Mini Hub' : 'Unavailable')}
                       </p>
                       <p className="text-[11px] text-slate-400 truncate">
-                        {originStop?.address || 'Kolar Rural Mandi Road'}
+                        {originStop?.address || (API_DEMO_MODE ? 'Kolar Rural Mandi Road' : '')}
                       </p>
                     </div>
                   </div>
@@ -127,10 +132,10 @@ export const DriverTrips: React.FC = () => {
                     </span>
                     <div className="min-w-0">
                       <p className="font-bold text-slate-800 truncate">
-                        Destination: {destStop?.name || 'Bengaluru Central Hub'}
+                        Destination: {destStop?.name || (API_DEMO_MODE ? 'Bengaluru Central Hub' : 'Unavailable')}
                       </p>
                       <p className="text-[11px] text-slate-400 truncate">
-                        {destStop?.address || 'Yeshwanthpur Wholesale APMC'}
+                        {destStop?.address || (API_DEMO_MODE ? 'Yeshwanthpur Wholesale APMC' : '')}
                       </p>
                     </div>
                   </div>
