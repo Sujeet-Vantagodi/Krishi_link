@@ -6,17 +6,20 @@ import { Button } from '../../components/ui/button';
 import { ArrowLeft, CheckCircle2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Logo } from '../../components/common/Logo';
+import { API_DEMO_MODE } from '../../lib/api/client';
+import { useQueryClient } from '@tanstack/react-query';
 
 export const VerifyOtp: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const reqId = searchParams.get('req') || 'req_demo';
   const phone = searchParams.get('phone') || '9876543210';
-  const { verifyOtp, role } = useAuthStore();
+  const { verifyOtp } = useAuthStore();
+  const queries = useQueryClient();
   const { i18n } = useTranslation();
   const isKn = i18n.language === 'kn';
 
-  const [otp, setOtp] = useState('123456');
+  const [otp, setOtp] = useState(API_DEMO_MODE ? '123456' : '');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
 
@@ -28,6 +31,8 @@ export const VerifyOtp: React.FC = () => {
     const success = await verifyOtp(reqId, otp);
     setLoading(false);
     if (success) {
+      queries.clear();
+      const { role } = useAuthStore.getState();
       const destination = {
         buyer: '/buyer',
         farmer: '/farmer',
@@ -59,7 +64,7 @@ export const VerifyOtp: React.FC = () => {
           {isKn ? 'ಒಟಿಪಿ ನಮೂದಿಸಿ' : 'Verify Mobile OTP'}
         </h2>
         <p className="mt-2 text-xs sm:text-sm text-slate-500">
-          Sent 6-digit code to <strong className="text-slate-800 dark:text-slate-200">+91 {phone}</strong>
+          {API_DEMO_MODE ? 'Sent 6-digit code to ' : 'Enter the 6-digit code for '}<strong className="text-slate-800 dark:text-slate-200">{phone.startsWith('+91') ? phone : `+91 ${phone}`}</strong>
         </p>
 
         <form onSubmit={handleVerify} className="mt-8 space-y-6">
@@ -67,12 +72,12 @@ export const VerifyOtp: React.FC = () => {
 
           {error && (
             <p className="text-xs text-red-600 font-bold">
-              Invalid OTP. Try 123456 for prototype demo.
+              {API_DEMO_MODE ? 'Invalid OTP. Try 123456 for prototype demo.' : 'Verification failed. Check your code and try again.'}
             </p>
           )}
 
           <div className="p-3 bg-emerald-50 dark:bg-emerald-950/40 rounded-xl border border-emerald-200 dark:border-emerald-800 text-xs text-emerald-800 dark:text-emerald-300">
-            💡 Quick Demo Tip: Default mock OTP is prefilled as <strong>123456</strong>
+            {API_DEMO_MODE ? <>💡 Quick Demo Tip: Default mock OTP is prefilled as <strong>123456</strong></> : 'Use the code associated with this verification request.'}
           </div>
 
           <Button

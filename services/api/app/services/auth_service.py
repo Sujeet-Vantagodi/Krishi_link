@@ -17,7 +17,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, Tuple, Optional
 from sqlalchemy.orm import Session
 from app.config import settings
-from app.models.user import User, Farmer, Buyer
+from app.models.user import User, Farmer, Buyer, PasswordCredential
 from app.models.enums import UserRole
 from app.core.security import create_access_token, create_refresh_token, decode_token
 from app.core.exceptions import KrishiLinkException, UnauthenticatedException
@@ -163,7 +163,8 @@ def verify_otp(db: Session, request_id: str, otp: str) -> Tuple[str, str, User, 
         db.commit()
         db.refresh(user)
     else:
-        if not user.is_active:
+        if (not user.is_active or user.role in _PROTECTED_ROLES
+                or db.get(PasswordCredential, user.id) is not None):
             raise UnauthenticatedException("User inactive or not found")
         # NEVER update role from API — existing role is authoritative
         user.last_login_at = now

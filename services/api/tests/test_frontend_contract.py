@@ -148,14 +148,39 @@ def test_settlement_approval_persists_without_marking_paid(api, db_session, seed
 def test_password_paths_and_production_mock_otp_fail_closed(api, monkeypatch, seed_data):
     for prefix in ("/api/auth", "/api/v1/auth"):
         admin_phone = seed_data["admin_user"].phone
-        for operation in ("login", "register"):
-            response = api.post(f"{prefix}/{operation}", json={"phone": admin_phone, "password": "ignored"})
-            assert response.status_code == 503
-            assert "access_token" not in response.json()
+        data = {"phone": admin_phone, "password": "invalid-password"}
+        assert api.post(f"{prefix}/login", json=data).status_code == 401
+        assert api.post(f"{prefix}/register", json={**data, "role": "admin", "name": "Admin"}).status_code == 403
     monkeypatch.setattr(settings, "ENVIRONMENT", "production")
     response = api.post("/api/v1/auth/otp/request", json={"phone": seed_data["buyer_user"].phone})
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "OTP_DELIVERY_UNAVAILABLE"
+
+
+def test_password_registration_login_and_refresh(api, db_session):
+    from app.models.user import Buyer, PasswordCredential
+    from uuid import UUID
+
+    payload = {"phone": "9876501234", "password": "correct-password",
+               "role": "buyer", "name": "Test Buyer", "email": "test@example.net", "address": "Test address"}
+    created = api.post("/api/v1/auth/register", json=payload)
+    assert created.status_code == 201
+    session = created.json()
+    user_id = UUID(session["user"]["id"])
+    credential = db_session.get(PasswordCredential, user_id)
+    assert payload["password"] not in credential.password_hash
+    assert db_session.get(Buyer, user_id).address == "Test address"
+    assert api.post("/api/v1/auth/register", json=payload).status_code == 409
+    assert api.post("/api/v1/auth/login", json={**payload, "password": "wrong"}).status_code == 401
+    logged_in = api.post("/api/v1/auth/login", json=payload)
+    assert logged_in.json()["user"]["id"] == str(user_id)
+    refreshed = api.post("/api/v1/auth/refresh", json={"refresh_token": session["refresh_token"]})
+    access = refreshed.json()["access_token"]
+    assert api.get("/api/v1/me", headers={"Authorization": f"Bearer {access}"}).json()["email"] == payload["email"]
+    challenge = api.post("/api/v1/auth/otp/request", json={"phone": "+919876501234"}).json()
+    assert api.post("/api/v1/auth/otp/verify", json={
+        "request_id": challenge["request_id"], "otp": challenge["mock_otp"],
+    }).status_code == 401
 
 
 def test_development_otp_verified_through_http(api, seed_data):
@@ -170,3 +195,49 @@ def test_development_otp_verified_through_http(api, seed_data):
     assert api.get("/api/v1/me", headers={"Authorization": f"Bearer {token}"}).json()["role"] == "buyer"
     assert api.post(url, json={"request_id": challenge["request_id"], "otp": challenge["mock_otp"]}).status_code == 400
     assert api.get("/openapi.json").status_code == 200
+
+
+def test_transfer_request_priority_rejection_and_permissions(api, seed_data):
+    path = "/api/v1/transfers"
+    admin = make_auth_headers(seed_data["admin_user"])
+    staff = make_auth_headers(seed_data["hub_staff_user"])
+    request = {
+        "from_hub_id": str(seed_data["main_hub"].id), "to_hub_id": str(seed_data["village_hub"].id),
+        "crop_id": str(seed_data["tomato"].id), "requested_kg": 10, "urgency": "HIGH",
+    }
+    created = api.post(path, headers=staff, json=request)
+    assert created.status_code == 201
+    transfer = created.json()
+    assert transfer["urgency"] == "HIGH"
+    assert api.post(f"{path}/{transfer['id']}/dispatch", headers=admin, json={"trip_id": str(uuid4())}).status_code == 422
+    rejection = f"{path}/{transfer['id']}/reject"
+    assert api.post(rejection, headers=staff).status_code == 403
+    assert api.post(rejection, headers=admin).json()["status"] == "REJECTED"
+    assert api.post(rejection, headers=admin).status_code == 409
+    assert api.get(path, headers=staff).json()["items"][0]["status"] == "REJECTED"
+
+
+def test_tracking_returns_only_persisted_telemetry(api, db_session, seed_data):
+    from app.models.enums import OrderStatus, StopType
+    from app.models.order import Order
+    from app.models.trip import LocationPing, TripStop
+    from app.models.base import utc_now
+
+    buyer = seed_data["buyer_user"]
+    driver = seed_data["driver_user"]
+    order = Order(buyer_id=buyer.id, delivery_date=date.today(), status=OrderStatus.OUT_FOR_DELIVERY)
+    trip = Trip(type=TripType.LAST_MILE, status=TripStatus.STARTED, driver_id=driver.id,
+                vehicle_id=seed_data["vehicle"].id, assigned_by=seed_data["admin_user"].id)
+    db_session.add_all([order, trip])
+    db_session.flush()
+    db_session.add(TripStop(trip_id=trip.id, seq=1, type=StopType.DELIVERY, buyer_order_id=order.id))
+    db_session.commit()
+    url = f"/api/v1/orders/{order.id}/tracking"
+    headers = make_auth_headers(buyer)
+    before = api.get(url, headers=headers).json()
+    assert before["status"] == "OUT_FOR_DELIVERY"
+    assert before["vehicle"] is None
+    assert before["eta_minutes"] is None
+    db_session.add(LocationPing(trip_id=trip.id, ts=utc_now(), driver_id=driver.id, location={"lat": 12.8, "lng": 77.5}))
+    db_session.commit()
+    assert api.get(url, headers=headers).json()["vehicle"]["lat"] == 12.8

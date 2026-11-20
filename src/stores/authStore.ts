@@ -1,14 +1,14 @@
 import { create } from 'zustand';
 import { User, Role } from '../types';
 import { changeLanguage } from '../i18n';
-import { API_BASE_URL } from '../lib/api/client';
+import { API_DEMO_MODE, ApiError, requestApi } from '../lib/api/client';
 
 export interface AuthState {
   user: User | null;
   role: Role;
   token: string | null;
   isAuthenticated: boolean;
-  setRole: (role: Role) => void;
+  acceptSession: (session: AuthSession) => User;
   setUser: (user: User | null) => void;
   loginWithPhone: (phone: string) => Promise<string>;
   verifyOtp: (requestId: string, otp: string) => Promise<boolean>;
@@ -57,171 +57,121 @@ export const DEMO_USERS: Record<Role, User> = {
   },
 };
 
-// Retrieve stored login session from localStorage
-const getInitialAuth = (): { user: User; role: Role; token: string; isAuthenticated: boolean } => {
-  if (typeof window !== 'undefined') {
-    try {
-      const storedUser = localStorage.getItem('krishilink_user');
-      const storedToken = localStorage.getItem('krishilink_token');
-      if (storedUser && storedToken) {
-        const parsed = JSON.parse(storedUser);
-        return {
-          user: parsed,
-          role: parsed.role || 'buyer',
-          token: storedToken,
-          isAuthenticated: true,
-        };
-      }
-    } catch (e) {
-      console.warn('Could not parse stored user session:', e);
-    }
-  }
-  return {
-    user: DEMO_USERS.buyer,
-    role: 'buyer',
-    token: 'mock_jwt_token_buyer_123',
-    isAuthenticated: true,
-  };
-};
+export interface AuthSession {
+  access_token: string;
+  refresh_token: string;
+  user: User | (Omit<User, 'role'> & { role: 'super_admin' });
+}
 
-const initialAuth = getInitialAuth();
+function presentationUser(user: AuthSession['user']): User {
+  return { ...user, role: user.role === 'super_admin' ? 'admin' : user.role };
+}
+
+const tokenKey = 'krishilink_token';
+const refreshKey = 'krishilink_refresh_token';
+const userKey = 'krishilink_user';
+const demoUser = API_DEMO_MODE
+  ? (() => {
+      const stored = localStorage.getItem(userKey);
+      try {
+        return stored ? JSON.parse(stored) as User : DEMO_USERS.buyer;
+      } catch {
+        return DEMO_USERS.buyer;
+      }
+    })()
+  : null;
+
+let sessionVersion = 0;
+let restoring: Promise<void> | undefined;
 
 export const useAuthStore = create<AuthState>((set, get) => ({
-  user: initialAuth.user,
-  role: initialAuth.role,
-  token: initialAuth.token,
-  isAuthenticated: initialAuth.isAuthenticated,
+  user: demoUser,
+  role: demoUser?.role ?? 'buyer',
+  token: API_DEMO_MODE ? 'mock_jwt_token_buyer_123' : null,
+  isAuthenticated: API_DEMO_MODE,
 
-  setRole: (role: Role) => {
-    const currentUser = get().user;
-    if (currentUser && currentUser.role === role) {
-      set({ role });
-      return;
-    }
-    const demoUser = DEMO_USERS[role] || DEMO_USERS.buyer;
-    set({ role, user: demoUser, isAuthenticated: true });
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('krishilink_user', JSON.stringify(demoUser));
-      localStorage.setItem('krishilink_token', 'mock_jwt_token_' + demoUser.id);
-    }
-    if (role === 'farmer') {
-      changeLanguage('kn');
-    } else {
-      changeLanguage('en');
+  acceptSession: (session) => {
+    sessionVersion++;
+    const user = presentationUser(session.user);
+    localStorage.setItem(tokenKey, session.access_token);
+    localStorage.setItem(refreshKey, session.refresh_token);
+    localStorage.setItem(userKey, JSON.stringify(user));
+    set({ user, role: user.role, token: session.access_token, isAuthenticated: true });
+    return user;
+  },
+
+  setUser: (user) => {
+    if (!user) {
+      get().logout();
+    } else if (user.id === get().user?.id) {
+      const updated = { ...user, role: get().role };
+      localStorage.setItem(userKey, JSON.stringify(updated));
+      set({ user: updated });
     }
   },
 
-  setUser: (user: User | null) => {
-    set({
-      user,
-      role: user ? user.role : 'buyer',
-      isAuthenticated: !!user,
-    });
-    if (typeof window !== 'undefined') {
-      if (user) {
-        localStorage.setItem('krishilink_user', JSON.stringify(user));
-      } else {
-        localStorage.removeItem('krishilink_user');
-        localStorage.removeItem('krishilink_token');
-      }
-    }
+  loginWithPhone: async (phone) => {
+    if (API_DEMO_MODE) return 'req_demo';
+    const result = await requestApi<{ request_id: string }>('/auth/otp/request', 'POST', { phone });
+    return result.request_id;
   },
 
-  loginWithPhone: async (phone: string) => {
+  verifyOtp: async (requestId, otp) => {
+    if (API_DEMO_MODE) return requestId === 'req_demo' && otp === '123456';
     try {
-      const res = await fetch(`${API_BASE_URL}/auth/otp/request`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        return data.request_id || 'req_' + Math.random().toString(36).substring(2, 8);
-      }
-    } catch (e) {
-      console.warn('Backend OTP request failed, using local simulation:', e);
-    }
-    return 'req_' + Math.random().toString(36).substring(2, 8);
-  },
-
-  verifyOtp: async (requestId: string, otp: string) => {
-    await new Promise((r) => setTimeout(r, 400));
-    // Accept 123456 or any 6-digit OTP for demo
-    if (otp === '123456' || otp.length === 6) {
-      const currentUser = get().user;
-      const user = currentUser || DEMO_USERS[get().role] || DEMO_USERS.buyer;
-      const token = get().token || ('mock_jwt_token_' + user.id);
-      set({
-        user,
-        isAuthenticated: true,
-        token,
-      });
-      if (typeof window !== 'undefined') {
-        localStorage.setItem('krishilink_user', JSON.stringify(user));
-        localStorage.setItem('krishilink_token', token);
-      }
+      get().acceptSession(await requestApi<AuthSession>('/auth/otp/verify', 'POST', {
+        request_id: requestId, otp,
+      }));
       return true;
+    } catch {
+      return false;
     }
-    return false;
   },
 
   logout: () => {
-    set({
-      user: null,
-      token: null,
-      isAuthenticated: false,
-    });
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('krishilink_user');
-      localStorage.removeItem('krishilink_token');
-    }
+    sessionVersion++;
+    localStorage.removeItem(tokenKey);
+    localStorage.removeItem(refreshKey);
+    localStorage.removeItem(userKey);
+    set({ user: null, role: 'buyer', token: null, isAuthenticated: false });
   },
 
-  switchDemoRole: (role: Role) => {
-    const newUser = DEMO_USERS[role];
-    set({
-      user: newUser,
-      role,
-      isAuthenticated: true,
-      token: 'mock_jwt_' + role,
-    });
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('krishilink_user', JSON.stringify(newUser));
-      localStorage.setItem('krishilink_token', 'mock_jwt_' + role);
-    }
-    if (role === 'farmer') {
-      changeLanguage('kn');
-    } else {
-      changeLanguage('en');
-    }
+  switchDemoRole: (role) => {
+    if (!API_DEMO_MODE) return;
+    const user = DEMO_USERS[role];
+    localStorage.setItem(userKey, JSON.stringify(user));
+    set({ user, role, isAuthenticated: true, token: 'mock_jwt_' + role });
+    changeLanguage(user.language);
   },
 
-  fetchCurrentUser: async () => {
-    const token = get().token || (typeof window !== 'undefined' ? localStorage.getItem('krishilink_token') : null);
-    if (!token) return;
-    try {
-      const res = await fetch(`${API_BASE_URL}/me`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const updatedUser: User = {
-          id: data.id,
-          name: data.name,
-          phone: data.phone,
-          email: data.email,
-          role: data.role as Role,
-          language: data.language || 'en',
-          employee_id: data.employee_id || (data.profile && data.profile.employee_id),
-          profile: data.profile,
-        };
-        set({ user: updatedUser, role: data.role as Role, isAuthenticated: true });
-        if (typeof window !== 'undefined') {
-          localStorage.setItem('krishilink_user', JSON.stringify(updatedUser));
+  fetchCurrentUser: () => {
+    if (API_DEMO_MODE || !localStorage.getItem(tokenKey)) return Promise.resolve();
+    if (restoring) return restoring;
+    const version = sessionVersion;
+    restoring = (async () => {
+      try {
+        let user: AuthSession['user'];
+        try {
+          user = await requestApi<AuthSession['user']>('/me');
+        } catch (error) {
+          const refresh_token = localStorage.getItem(refreshKey);
+          if (!(error instanceof ApiError) || error.code !== 'HTTP_401' && error.code !== 'UNAUTHENTICATED' ||
+              !refresh_token || version !== sessionVersion) throw error;
+          const tokens = await requestApi<Omit<AuthSession, 'user'>>('/auth/refresh', 'POST', { refresh_token });
+          if (version !== sessionVersion) return;
+          localStorage.setItem(tokenKey, tokens.access_token);
+          localStorage.setItem(refreshKey, tokens.refresh_token);
+          user = await requestApi<AuthSession['user']>('/me');
         }
+        if (version !== sessionVersion) return;
+        const updated = presentationUser(user);
+        localStorage.setItem(userKey, JSON.stringify(updated));
+        set({ user: updated, role: updated.role, token: localStorage.getItem(tokenKey), isAuthenticated: true });
+      } catch (error) {
+        if (version === sessionVersion && error instanceof ApiError &&
+            ['HTTP_401', 'UNAUTHENTICATED'].includes(error.code)) get().logout();
       }
-    } catch (e) {
-      // offline or backend unreachable
-    }
+    })().finally(() => { restoring = undefined; });
+    return restoring;
   },
 }));

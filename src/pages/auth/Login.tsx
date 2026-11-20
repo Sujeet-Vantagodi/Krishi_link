@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
-import { useAuthStore, DEMO_USERS } from '../../stores/authStore';
-import { mockDb } from '../../lib/api/mock/db';
+import React, { useEffect, useState } from 'react';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { useAuthStore, DEMO_USERS, type AuthSession } from '../../stores/authStore';
+import { useQueryClient } from '@tanstack/react-query';
 import { PhoneInput } from '../../components/forms/PhoneInput';
 import { Button } from '../../components/ui/button';
 import { RoleSwitcher } from '../../routes/RoleSwitcher';
@@ -29,8 +29,12 @@ import {
 import { useTranslation } from 'react-i18next';
 import { LanguageSwitch } from '../../components/common/LanguageSwitch';
 import { Logo } from '../../components/common/Logo';
-import { Role, User as UserType } from '../../types';
-import { API_BASE_URL } from '../../lib/api/client';
+import { Role } from '../../types';
+import { API_DEMO_MODE, requestApi } from '../../lib/api/client';
+
+function dashboardPath(role: Role): string {
+  return role === 'hub_staff' ? '/admin/hubs' : `/${role}`;
+}
 
 export const Login: React.FC = () => {
   const navigate = useNavigate();
@@ -38,7 +42,20 @@ export const Login: React.FC = () => {
   const initialMode = searchParams.get('mode') === 'register' ? 'register' : 'login';
   const initialRole = (searchParams.get('role') as Role) || 'buyer';
 
-  const { loginWithPhone, setUser, setRole } = useAuthStore();
+  const { loginWithPhone, acceptSession, fetchCurrentUser } = useAuthStore();
+  const location = useLocation();
+  const queries = useQueryClient();
+
+  useEffect(() => {
+    const from = location.state?.from;
+    if (API_DEMO_MODE || !from || typeof from.pathname !== 'string' ||
+        !/^\/(buyer|farmer|driver|admin)(\/|$)/.test(from.pathname)) return;
+    let active = true;
+    void fetchCurrentUser().then(() => {
+      if (active && useAuthStore.getState().isAuthenticated) navigate(from, { replace: true });
+    });
+    return () => { active = false; };
+  }, [fetchCurrentUser, location.state, navigate]);
   const { i18n } = useTranslation();
   const isKn = i18n.language === 'kn';
 
@@ -95,69 +112,15 @@ export const Login: React.FC = () => {
     setLoginError(null);
 
     try {
-      const res = await fetch(`${API_BASE_URL}/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone, password }),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        const authenticatedUser: UserType = {
-          id: data.user.id,
-          name: data.user.name,
-          phone: data.user.phone,
-          email: data.user.email,
-          role: data.user.role as Role,
-          language: data.user.language || (data.user.role === 'farmer' ? 'kn' : 'en'),
-          employee_id: data.user.employee_id || (data.user.profile && data.user.profile.employee_id),
-          profile: data.user.profile,
-        };
-
-        setUser(authenticatedUser);
-        setRole(data.user.role as Role);
-        localStorage.setItem('krishilink_token', data.access_token);
-        localStorage.setItem('krishilink_user', JSON.stringify(authenticatedUser));
-
-        setLoginSuccessMessage(
-          isKn
-            ? `${authenticatedUser.name} ಅವರಾಗಿ ಲಾಗಿನ್ ಆಗುತ್ತಿದ್ದೀರಿ...`
-            : `Signed in as ${authenticatedUser.name} (${data.user.role.toUpperCase()})`
-        );
-
-        setTimeout(() => {
-          setLoading(false);
-          const destination =
-            {
-              buyer: '/buyer',
-              farmer: '/farmer',
-              driver: '/driver',
-              admin: '/admin',
-              hub_staff: '/admin',
-            }[data.user.role as Role] || '/buyer';
-          navigate(destination);
-        }, 500);
-        return;
-      } else {
-        const errData = await res.json().catch(() => ({}));
-        setLoginError(
-          errData.detail ||
-            (isKn
-              ? 'ಅಮಾನ್ಯ ಫೋನ್ ಸಂಖ್ಯೆ ಅಥವಾ ಪಾಸ್‌ವರ್ಡ್. ಪ್ರವೇಶ ನಿರಾಕರಿಸಲಾಗಿದೆ.'
-              : 'Invalid phone number or password. Access denied.')
-        );
-        setLoading(false);
-        return;
-      }
-    } catch (err) {
-      console.warn('Backend live login connecting error:', err);
-      setLoginError(
-        isKn
-          ? 'ಸರ್ವರ್ ಸಂಪರ್ಕ ವಿಫಲವಾಗಿದೆ. ದಯವಿಟ್ಟು ಬ್ಯಾಕೆಂಡ್ ಚಾಲನೆಯಲ್ಲಿದೆಯೇ ಎಂದು ಪರಿಶೀಲಿಸಿ.'
-          : 'Server connection failed. Ensure backend API is running on port 8000.'
-      );
+      const session = await requestApi<AuthSession>('/auth/login', 'POST', { phone, password });
+      queries.clear();
+      const user = acceptSession(session);
+      setLoginSuccessMessage(`Signed in as ${user.name} (${user.role.toUpperCase()})`);
+      navigate(dashboardPath(user.role), { replace: true });
+    } catch (error) {
+      setLoginError(error instanceof Error ? error.message : 'Sign in failed.');
+    } finally {
       setLoading(false);
-      return;
     }
   };
 
@@ -194,9 +157,15 @@ export const Login: React.FC = () => {
     e.preventDefault();
     if (phone.length < 10) return;
     setLoading(true);
-    const reqId = await loginWithPhone(phone);
-    setLoading(false);
-    navigate(`/auth/verify?req=${reqId}&phone=${phone}`);
+    setLoginError(null);
+    try {
+      const reqId = await loginWithPhone(phone);
+      navigate(`/auth/verify?${new URLSearchParams({ req: reqId, phone })}`);
+    } catch (error) {
+      setLoginError(error instanceof Error ? error.message : 'Could not request an OTP.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleRegisterSubmit = async (e: React.FormEvent) => {
@@ -217,7 +186,7 @@ export const Login: React.FC = () => {
         role: selectedRole,
         name: regName.trim(),
         phone: formattedPhone,
-        password: regPassword.trim(),
+        password: regPassword,
         email: regEmail.trim() || undefined,
         village: village.trim(),
         taluk: taluk.trim(),
@@ -233,55 +202,15 @@ export const Login: React.FC = () => {
         station: adminStation,
       };
 
-      const res = await fetch(`${API_BASE_URL}/auth/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(registerPayload),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        const newUser: UserType = {
-          id: data.user.id,
-          name: data.user.name,
-          phone: data.user.phone,
-          email: data.user.email,
-          role: data.user.role as Role,
-          language: data.user.language || (data.user.role === 'farmer' ? 'kn' : 'en'),
-          employee_id: data.user.employee_id || (data.user.profile && data.user.profile.employee_id),
-          profile: data.user.profile,
-        };
-
-        mockDb.users.push(newUser);
-        setUser(newUser);
-        setRole(selectedRole);
-        localStorage.setItem('krishilink_token', data.access_token);
-        localStorage.setItem('krishilink_user', JSON.stringify(newUser));
-
-        setRegisterSuccess(true);
-        setTimeout(() => {
-          setLoading(false);
-          const destination = {
-            buyer: '/buyer',
-            farmer: '/farmer',
-            driver: '/driver',
-            admin: '/admin',
-            hub_staff: '/admin',
-          }[selectedRole] || '/buyer';
-          navigate(destination);
-        }, 800);
-        return;
-      } else {
-        const errData = await res.json().catch(() => ({}));
-        setRegisterError(errData.detail || 'Failed to create account. Please check your details.');
-        setLoading(false);
-        return;
-      }
-    } catch (err) {
-      console.warn('Backend live register error:', err);
-      setRegisterError('Server connection failed. Ensure backend API is running on port 8000.');
+      const session = await requestApi<AuthSession>('/auth/register', 'POST', registerPayload);
+      queries.clear();
+      const user = acceptSession(session);
+      setRegisterSuccess(true);
+      navigate(dashboardPath(user.role), { replace: true });
+    } catch (error) {
+      setRegisterError(error instanceof Error ? error.message : 'Could not create the account.');
+    } finally {
       setLoading(false);
-      return;
     }
   };
 

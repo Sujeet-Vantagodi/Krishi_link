@@ -1,5 +1,16 @@
 # Frontend contract audit
 
+## Continuation from `1dbca2e`
+
+| UI operation | Live request and result | Follow-up |
+| --- | --- | --- |
+| Password sign-in | POST `/auth/login` with Indian mobile and password. FastAPI validates credentials and returns JWTs and the persisted role. | Provision operational accounts through administration. The form's role selector does not grant roles. |
+| Buyer/farmer registration | POST `/auth/register` with the existing role and profile payload. Returns 201 with the persisted user and tokens. Duplicate phones return 409. | Phone and contact email ownership verification still needs a provider. The UI's static six-character hint predates the eight-character API minimum. |
+| OTP challenge and confirmation | The existing handlers call `/auth/otp/request` and `/auth/otp/verify`. Bad or repeated challenges fail. | Explicit development OTP only. Production SMS is unavailable. Demo OTP cannot sign into password or operational accounts. |
+| Protected route reload | Protected route redirects through the existing login handler, which calls `/me` and returns to the original route when verified. Expired access can trigger `/auth/refresh`. | Logout clears the local session. Server-side token revocation remains outstanding. |
+| Transfers board | Authenticated GET `/transfers`, POST request, and POST approve/reject. Priorities and decisions persist. The adapter estimates distance and transit using hub coordinates and 35 km/h. | Status-only controls cannot safely provide an assigned trip, sent weight, or measured received weight. Older inactive hubs may also require additional presentation data. |
+| Order status and telemetry | Native GET `/orders/{id}/tracking` returns persisted order status and the latest assigned-driver ping when present. | The protected tracking page still inserts placeholder OTP, ETA and driver details. The live adapter remains unavailable pending approval for that logic. |
+
 Baseline: `9c9a89bb94e118817838c1058a0d7cf57c25651b`. The routes and TypeScript contracts under `src/` govern presentation.
 
 Highest risks: legacy registration can issue an existing account token, legacy login accepts arbitrary passwords in demo mode, protected session state fabricates users, and the frontend network adapter mostly writes to memory. Transfer status buttons lack assignment and measured receipt inputs.

@@ -1,5 +1,38 @@
 # KrishiLink frontend-first integration report
 
+## Continuation from `1dbca2eb727b385cddae2b0c280107acdbe1e609`
+
+| Scope | Result |
+| --- | --- |
+| Password authentication | Buyer and farmer registration, salted scrypt verification, duplicate protection, backend role navigation, JWT issuance, current user and refresh. The approved frontend handlers no longer fall back to mock authentication in live mode. |
+| OTP | Real API challenge and verification with explicitly enabled development OTP. Production reports unavailable SMS. Fixed development OTP cannot sign into password or operational accounts. |
+| Transfers | Live listing, requests, approval and rejection, persisted urgency and hub-scoped access. Native dispatch now requires an explicit sent weight. The current frontend cannot collect assignment and measured weights, so its dispatch and receipt actions remain unavailable. |
+| Tracking | Native API now returns real order status and assigned-driver telemetry, with null missing location and ETA. The protected page contains synthetic fallbacks, so its live adapter stays unavailable. Buyer order replay no longer rotates the delivery code, and idempotency collision handling respects buyer ownership. |
+
+### Verification for this continuation
+
+- `python -m pytest -q --tb=short` from `services/api` passed **64 tests** with seven deprecation warnings. This includes native buyer order, driver workflow, dispatch, and transfer lifecycle tests as well as password, OTP, transfer validation and tracking contract tests.
+- `node_modules/.bin/tsc.cmd --noEmit` passed. Vite production and explicit-demo builds both passed in the standalone temporary checkout. `app.openapi()` generated **82 paths**.
+- Playwright live smoke passed buyer form registration, wrong and correct passwords, development OTP, and protected-route session restoration on navigation. It also passed live buyer catalog/detail, farmer threshold and harvest writes, hub stock updates, admin settlement read, and transfer approval. It checked persisted writes after reload.
+- The original CSS asset remained byte-identical. All 12 desktop/mobile screenshot pairs against the source commit matched pixel-for-pixel in the demo comparison. The protected-file check against `origin/2branch` found no changes outside the two API modules and the three approved auth files. No top-level teammate database files changed.
+- Browser checkout, driver itinerary/receipts, dispatch, and transfer dispatch/receipt remain unverified. The settlement browser check reads persisted statements, and does not verify hub scale reconciliation.
+
+### Remaining work
+
+- Checkout still sends a fixed date. The API lacks the immutable delivery address and verified payment contract needed by the existing order history and checkout. Tracking needs permission to remove hardcoded driver, ETA and OTP fallbacks from the protected page.
+- Driver and dispatch UI still need stop and assignment contracts that preserve the existing business invariants. The protected arrival hook drops coordinates. Pickup and delivery forms also need support for batch evidence with per-crop measurements.
+- Settlement calculation uses confirmed grade A/B pickup receipts. Per-farmer allocation when the aggregate hub weight differs from those receipts remains unresolved.
+- Operational password provisioning, verified phone ownership, production SMS, and server-side refresh revocation require separate integration. The current schema migrations were exercised through fresh SQLite ORM schema creation and tests. PostgreSQL Alembic application remains unverified.
+
+### Changed files
+
+- Frontend `src/stores/authStore.ts`, `src/pages/auth/Login.tsx`, `src/pages/auth/VerifyOtp.tsx`, and `src/lib/api/index.ts`.
+- API models `app/models/{user,trip}.py`, routes and schemas `app/{routers,schemas}/{auth,orders,transfers}` (schema modules use the singular `order` and `transfer`), and services `app/services/{auth_service,password_service,order_service,transfer_service}.py`.
+- Migrations `0003_password_credentials.py` and `0004_transfer_urgency.py`.
+- `tests/test_frontend_contract.py`, `tests/frontend_smoke.mjs`, and the setup, audit, DB requirements and integration documents.
+
+## Prior integration results
+
 ## Repository and scope
 
 - Repository `Sujeet-Vantagodi/Krishi_link`, source `origin/2branch` at `9c9a89bb94e118817838c1058a0d7cf57c25651b`.

@@ -47,11 +47,8 @@ def create_buyer_order(
     if idempotency_key:
         existing = db.query(Order).filter(Order.idempotency_key == idempotency_key).with_for_update().first()
         if existing:
-            if existing.status != OrderStatus.DELIVERED:
-                code = _new_delivery_code()
-                existing.delivery_code_hash = _delivery_code_hash(code)
-                existing.delivery_code = code
-                db.commit()
+            if existing.buyer_id != buyer_id:
+                raise ConflictException("Idempotency key is not available")
             return existing
 
     buyer = db.query(Buyer).filter(Buyer.user_id == buyer_id).first()
@@ -179,6 +176,8 @@ def create_buyer_order(
         if idempotency_key:
             existing = db.query(Order).filter(Order.idempotency_key == idempotency_key).first()
             if existing:
+                if existing.buyer_id != buyer_id:
+                    raise ConflictException("Idempotency key is not available")
                 return existing
         raise
     db.refresh(order)

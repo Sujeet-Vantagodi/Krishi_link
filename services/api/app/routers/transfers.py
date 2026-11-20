@@ -25,8 +25,11 @@ def _assert_hub_access(db: Session, user: User, hub_id: uuid.UUID) -> None:
 
 
 @router.get("", response_model=dict)
-def list_transfers(status_filter: Optional[TransferStatus] = Query(None, alias="status"), db: Session = Depends(get_db), _: User = Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.HUB_STAFF))):
-    items = transfer_service.list_transfers(db, status_filter)
+def list_transfers(status_filter: Optional[TransferStatus] = Query(None, alias="status"), db: Session = Depends(get_db), user: User = Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.HUB_STAFF))):
+    hub_ids = None
+    if user.role == UserRole.HUB_STAFF:
+        hub_ids = {hub_id for (hub_id,) in db.query(HubStaff.hub_id).filter_by(user_id=user.id)}
+    items = transfer_service.list_transfers(db, status_filter, hub_ids)
     return {"items": [TransferOut.model_validate(item).model_dump(mode="json") for item in items], "total": len(items)}
 
 
@@ -39,6 +42,12 @@ def create_transfer(payload: TransferCreate, db: Session = Depends(get_db), user
 @router.post("/{transfer_id}/approve", response_model=TransferOut)
 def approve_transfer(transfer_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN))):
     return transfer_service.approve_transfer(db, transfer_id, user)
+
+
+@router.post("/{transfer_id}/reject", response_model=TransferOut)
+def reject_transfer(transfer_id: uuid.UUID, db: Session = Depends(get_db),
+                    _: User = Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN))):
+    return transfer_service.reject_transfer(db, transfer_id)
 
 
 @router.post("/{transfer_id}/dispatch", response_model=TransferOut)

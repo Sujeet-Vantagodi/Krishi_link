@@ -1,6 +1,7 @@
 import { mockDb } from './mock/db';
 import { delay, ApiError, API_DEMO_MODE, requestApi } from './client';
 import { mockRealtime } from '../realtime/mockRealtime';
+import { calculateDistanceKm } from '../geo';
 import {
   Crop,
   Order,
@@ -712,10 +713,42 @@ export async function updateStockStatus(
 // ==================== 6. TRANSFERS ====================
 
 export async function getTransfers(status?: string): Promise<TransferRequest[]> {
-  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
+  if (!API_DEMO_MODE) {
+    const query = status ? `?status=${encodeURIComponent(status)}` : '';
+    const [result, present] = await Promise.all([
+      requestApi<{ items: TransferRecord[] }>(`/transfers${query}`),
+      transferPresenter(),
+    ]);
+    return result.items.map(present);
+  }
   await delay(180);
   if (status) return mockDb.transfers.filter((t) => t.status === status);
   return [...mockDb.transfers];
+}
+
+type TransferRecord = Omit<TransferRequest, 'distance_km' | 'eta_hours' | 'trip_id'> & {
+  trip_id: string | null;
+};
+
+async function transferPresenter() {
+  const [hubs, crops] = await Promise.all([getHubs(), getCrops()]);
+  return (record: TransferRecord): TransferRequest => {
+    const from_hub = hubs.find(({ id }) => id === record.from_hub_id);
+    const to_hub = hubs.find(({ id }) => id === record.to_hub_id);
+    if (!from_hub || !to_hub) {
+      throw new ApiError('TRANSFER_HUB_DETAILS_UNAVAILABLE', 'The transfer is missing hub location data');
+    }
+    const distance = calculateDistanceKm(from_hub.location, to_hub.location);
+    return {
+      ...record,
+      trip_id: record.trip_id ?? undefined,
+      from_hub,
+      to_hub,
+      crop: crops.find(({ id }) => id === record.crop_id),
+      distance_km: Math.round(distance * 10) / 10,
+      eta_hours: Math.round(distance / 35 * 10) / 10,
+    };
+  };
 }
 
 export async function createTransfer(data: {
@@ -725,7 +758,10 @@ export async function createTransfer(data: {
   requested_kg: number;
   urgency?: 'LOW' | 'NORMAL' | 'HIGH' | 'CRITICAL';
 }): Promise<TransferRequest> {
-  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
+  if (!API_DEMO_MODE) {
+    const present = await transferPresenter();
+    return present(await requestApi<TransferRecord>('/transfers', 'POST', data));
+  }
   await delay(300);
   const fromHub = mockDb.hubs.find((h) => h.id === data.from_hub_id);
   const toHub = mockDb.hubs.find((h) => h.id === data.to_hub_id);
@@ -754,7 +790,12 @@ export async function createTransfer(data: {
 }
 
 export async function updateTransferStatus(id: string, status: any) {
-  if (!API_DEMO_MODE) throw new ApiError('UNAVAILABLE', 'This operation is unavailable in live mode');
+  if (!API_DEMO_MODE) {
+    const action = status === 'APPROVED' ? 'approve' : status === 'REJECTED' ? 'reject' : null;
+    if (!action) throw new ApiError('TRANSFER_EVIDENCE_REQUIRED', 'Dispatch requires an assigned trip and receiving requires a measured weight');
+    const present = await transferPresenter();
+    return present(await requestApi<TransferRecord>(`/transfers/${encodeURIComponent(id)}/${action}`, 'POST'));
+  }
   await delay(200);
   const tr = mockDb.transfers.find((t) => t.id === id);
   if (tr) {

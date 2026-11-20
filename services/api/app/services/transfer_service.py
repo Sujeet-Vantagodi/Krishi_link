@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import BusinessRuleException, ConflictException, NotFoundException, OutOfStockException
@@ -13,14 +13,17 @@ from app.models.user import User
 from app.services.stock_service import get_hub_physical_stock
 
 
-def list_transfers(db: Session, status: TransferStatus | None = None) -> list[TransferRequest]:
+def list_transfers(db: Session, status: TransferStatus | None = None,
+                   hub_ids: set[uuid.UUID] | None = None) -> list[TransferRequest]:
     query = db.query(TransferRequest)
+    if hub_ids is not None:
+        query = query.filter(or_(TransferRequest.from_hub_id.in_(hub_ids), TransferRequest.to_hub_id.in_(hub_ids)))
     if status:
         query = query.filter(TransferRequest.status == status)
     return query.order_by(TransferRequest.created_at.desc()).all()
 
 
-def create_transfer(db: Session, actor: User, *, from_hub_id: uuid.UUID, to_hub_id: uuid.UUID, crop_id: uuid.UUID, requested_kg: float) -> TransferRequest:
+def create_transfer(db: Session, actor: User, *, from_hub_id: uuid.UUID, to_hub_id: uuid.UUID, crop_id: uuid.UUID, requested_kg: float, urgency: str = "NORMAL") -> TransferRequest:
     if from_hub_id == to_hub_id:
         raise BusinessRuleException("Source and destination hubs must differ")
     if not db.get(Hub, from_hub_id):
@@ -29,7 +32,7 @@ def create_transfer(db: Session, actor: User, *, from_hub_id: uuid.UUID, to_hub_
         raise NotFoundException("Destination hub", to_hub_id)
     if not db.get(Crop, crop_id):
         raise NotFoundException("Crop", crop_id)
-    record = TransferRequest(from_hub_id=from_hub_id, to_hub_id=to_hub_id, crop_id=crop_id, requested_kg=requested_kg, status=TransferStatus.REQUESTED, requested_by=actor.id)
+    record = TransferRequest(from_hub_id=from_hub_id, to_hub_id=to_hub_id, crop_id=crop_id, requested_kg=requested_kg, status=TransferStatus.REQUESTED, requested_by=actor.id, urgency=urgency)
     db.add(record)
     db.commit()
     db.refresh(record)
@@ -49,7 +52,19 @@ def approve_transfer(db: Session, transfer_id: uuid.UUID, actor: User) -> Transf
     return transfer
 
 
-def dispatch_transfer(db: Session, transfer_id: uuid.UUID, trip_id: uuid.UUID, sent_kg: float | None, actor: User) -> TransferRequest:
+def reject_transfer(db: Session, transfer_id: uuid.UUID) -> TransferRequest:
+    transfer = db.query(TransferRequest).filter(TransferRequest.id == transfer_id).with_for_update().first()
+    if not transfer:
+        raise NotFoundException("Transfer", transfer_id)
+    if transfer.status != TransferStatus.REQUESTED:
+        raise ConflictException(f"Cannot reject transfer in status {transfer.status.value}")
+    transfer.status = TransferStatus.REJECTED
+    db.commit()
+    db.refresh(transfer)
+    return transfer
+
+
+def dispatch_transfer(db: Session, transfer_id: uuid.UUID, trip_id: uuid.UUID, sent_kg: float, actor: User) -> TransferRequest:
     transfer = db.query(TransferRequest).filter(TransferRequest.id == transfer_id).with_for_update().first()
     if not transfer:
         raise NotFoundException("Transfer", transfer_id)
@@ -62,7 +77,7 @@ def dispatch_transfer(db: Session, transfer_id: uuid.UUID, trip_id: uuid.UUID, s
         raise BusinessRuleException("Assigned trip must be a TRANSFER trip between the requested hubs")
     if trip.status not in (TripStatus.ASSIGNED, TripStatus.ACKNOWLEDGED, TripStatus.STARTED):
         raise ConflictException("Transfer trip is not dispatchable in its current state")
-    qty = float(sent_kg if sent_kg is not None else transfer.requested_kg)
+    qty = float(sent_kg)
     if qty <= 0 or qty > float(transfer.requested_kg):
         raise BusinessRuleException("sent_kg must be positive and no greater than requested_kg")
 

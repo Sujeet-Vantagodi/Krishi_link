@@ -56,6 +56,7 @@ class OrderResponse(BaseModel):
 class OrderTrackingResponse(BaseModel):
     order_id: uuid.UUID
     status: OrderStatus
+    trip_id: Optional[uuid.UUID] = None
     driver: Optional[dict] = None  # {"name": "...", "vehicle_no": "..."}
     vehicle: Optional[dict] = None  # {"lat": ..., "lng": ..., "heading": ...}
     destination: Optional[dict] = None

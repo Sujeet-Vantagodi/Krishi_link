@@ -1,5 +1,12 @@
 # Database integration requirements
 
+## Continuation migrations
+
+- API-owned Alembic revision `0003_password_credentials` adds a one-to-one table referencing `users.id`. It stores a salted scrypt verifier and optional contact email. Existing users have no password until provisioned. The API never reads or imports the teammate credential store. Compare normalized phone identities and UUID ownership before migrating any credentials.
+- Revision `0004_transfer_urgency` adds `transfer_requests.urgency` with `NORMAL` as the default for new and existing requests. Existing assignments, weights, stock and statuses are preserved.
+- Fresh SQLite databases created by FastAPI include both changes. Apply Alembic to an API-owned PostgreSQL database after reviewing the prior schema. An existing SQLite database initialized through `create_all` needs an explicit schema upgrade or a fresh isolated demo database. Back up and coordinate any database with existing data.
+- Buyer checkout still needs an immutable per-order delivery address, a current requested date, and reconciliation against a payment provider. The existing form sends the fixed date `2026-11-20`. Transfer dispatch and receipt require actual trip assignment and measured weights. Hub reconciliation for settlement needs a policy for allocating mismatched aggregate weights to farmers.
+
 The FastAPI routers in `app/main.py` use `app/database.py` and the ORM under `app/models/`. The separate `database/connection.py`, `database/models.py`, SQLite file and `database/01_schema.sql` have a separate setup path. Treat those as teammate-owned. Coordinate the canonical schema and migration order before pointing the API at their data. The integration checks use isolated SQLite. PostgreSQL and PostGIS compatibility remain unverified.
 
 | Feature and severity | Frontend contract | API ORM and teammate definition | Required owner action |

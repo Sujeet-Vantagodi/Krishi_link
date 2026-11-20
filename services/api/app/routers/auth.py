@@ -4,11 +4,12 @@ from app.database import get_db
 from app.config import settings
 from app.schemas.auth import (
     OtpRequest, OtpRequestResponse, OtpVerify,
-    RefreshTokenRequest, TokenResponse, UserResponse, UserUpdate
+    RefreshTokenRequest, TokenResponse, UserResponse, UserUpdate, PasswordLogin, PasswordRegistration
 )
 from app.services.auth_service import request_otp, verify_otp, refresh_user_token
 from app.core.dependencies import get_current_user
-from app.models.user import User
+from app.models.user import PasswordCredential, User
+from app.services.password_service import login_with_password, register_password_account
 from app.models.enums import UserRole
 from app.core.security import create_access_token, create_refresh_token
 from pydantic import BaseModel
@@ -19,15 +20,25 @@ router = APIRouter(prefix="", tags=["Auth"])
 legacy_auth_router = APIRouter(tags=["Auth"])
 
 
-@legacy_auth_router.post("/api/auth/login", include_in_schema=False)
-@legacy_auth_router.post("/api/auth/register", include_in_schema=False)
-@router.post("/auth/login", include_in_schema=False)
-@router.post("/auth/register", include_in_schema=False)
-def password_auth_unavailable():
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail="Password authentication is unavailable until the credential store is integrated.",
+def password_session(user: User, email: str | None) -> TokenResponse:
+    return TokenResponse(
+        access_token=create_access_token(user.id, user.role),
+        refresh_token=create_refresh_token(user.id, user.role),
+        user=UserResponse.model_validate(user).model_copy(update={"email": email}),
     )
+
+
+@legacy_auth_router.post("/api/auth/login", include_in_schema=False)
+@router.post("/auth/login", response_model=TokenResponse)
+def password_login(data: PasswordLogin, db: Session = Depends(get_db)):
+    return password_session(*login_with_password(db, data))
+
+
+@legacy_auth_router.post("/api/auth/register", status_code=201, include_in_schema=False)
+@router.post("/auth/register", response_model=TokenResponse, status_code=201)
+def password_registration(data: PasswordRegistration, db: Session = Depends(get_db)):
+    return password_session(*register_password_account(db, data))
+
 
 DEMO_ACCOUNTS = {
     UserRole.FARMER: "+919999001001",
@@ -104,8 +115,11 @@ def api_logout(current_user: User = Depends(get_current_user)):
 
 
 @router.get("/me", response_model=UserResponse)
-def api_get_me(current_user: User = Depends(get_current_user)):
-    return current_user
+def api_get_me(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    credential = db.get(PasswordCredential, current_user.id)
+    return UserResponse.model_validate(current_user).model_copy(
+        update={"email": credential.contact_email if credential else None},
+    )
 
 
 @router.put("/me", response_model=UserResponse)

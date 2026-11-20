@@ -25,7 +25,7 @@ npm.cmd run dev -- --host 127.0.0.1
 
 Live adapter calls are the default. To start an explicit frontend simulation, set `VITE_API_DEMO_MODE=true` before starting Vite or building, and use the existing demo role navigation. Demo data belongs to the current browser session. Backend demo login and browser simulation are independent.
 
-Password sign-in and registration return an unavailable response pending identity storage integration. Dev OTP challenges are generated only with explicit development settings and do not send SMS. The protected frontend OTP and role-selection paths still require approval before a real login journey is possible. The live browser smoke establishes its test session using the gated backend demo login against the isolated database. Do not expose this development server to other clients.
+Buyer and farmer password registration persists a user and its credential in the API-owned database. Sign in with that mobile number and password. Existing operational users require administrator provisioning. Dev OTP challenges require explicit development settings and do not send SMS. The browser smoke uses the normal sign-up and sign-in forms for its buyer session and gated demo identities for operational workflows. Do not expose this development server to other clients.
 
 Run the FastAPI suite from `services/api` using `python -m pytest -q`. Run `npm.cmd run build` from the standalone frontend checkout. The build includes TypeScript checking. If testing via Vite preview on a different port, include its exact origin in backend `ALLOWED_ORIGINS` before launching FastAPI.
 

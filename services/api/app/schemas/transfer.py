@@ -1,8 +1,11 @@
 import uuid
 from datetime import datetime
+from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import TransferStatus
+
+TransferUrgency = Literal["LOW", "NORMAL", "HIGH", "CRITICAL"]
 
 
 class TransferCreate(BaseModel):
@@ -10,11 +13,12 @@ class TransferCreate(BaseModel):
     to_hub_id: uuid.UUID
     crop_id: uuid.UUID
     requested_kg: float = Field(gt=0)
+    urgency: TransferUrgency = "NORMAL"
 
 
 class TransferDispatch(BaseModel):
     trip_id: uuid.UUID
-    sent_kg: float | None = Field(default=None, gt=0)
+    sent_kg: float = Field(gt=0)
 
 
 class TransferReceive(BaseModel):
@@ -32,6 +36,7 @@ class TransferOut(BaseModel):
     sent_kg: float | None = None
     received_kg: float | None = None
     status: TransferStatus
+    urgency: TransferUrgency
     trip_id: uuid.UUID | None = None
     requested_by: uuid.UUID | None = None
     approved_by: uuid.UUID | None = None

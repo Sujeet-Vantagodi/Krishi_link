@@ -92,6 +92,7 @@ class LocationPing(Base):
 
 class TransferRequest(Base, TimestampMixin):
     __tablename__ = "transfer_requests"
+    urgency: Mapped[str] = mapped_column(String(8), nullable=False, default="NORMAL", server_default="NORMAL")
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     from_hub_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("hubs.id", ondelete="CASCADE"), nullable=False)

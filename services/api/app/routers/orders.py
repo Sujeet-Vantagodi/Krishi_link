@@ -6,7 +6,10 @@ from app.database import get_db
 from app.models.user import User
 from app.models.order import Order, OrderItem
 from app.models.crop import Crop
-from app.models.trip import Trip, TripStop
+from app.models.trip import LocationPing, Trip, TripStop
+from app.models.base import utc_now
+from datetime import timezone
+from math import ceil
 from app.models.enums import UserRole, OrderStatus, TripStatus
 from app.schemas.order import (
     OrderCreate, OrderResponse, OrderItemResponse,
@@ -166,7 +169,9 @@ def api_track_order(
     if current_user.role == UserRole.BUYER and order.buyer_id != current_user.id:
         raise ForbiddenException("Access to this order tracking is forbidden")
 
-    stop = db.query(TripStop).join(Trip).filter(TripStop.buyer_order_id == id).first()
+    stop = (db.query(TripStop).join(Trip).filter(
+        TripStop.buyer_order_id == id, Trip.status != TripStatus.CANCELLED,
+    ).order_by(Trip.created_at.desc()).first())
     driver_info = None
     vehicle_info = None
     eta_mins = None
@@ -175,23 +180,32 @@ def api_track_order(
         trip = stop.trip
         if trip.driver and trip.driver.user:
             driver_info = {
-                "name": trip.driver.user.name or "Assigned Driver",
-                "phone": trip.driver.user.phone
+                "name": trip.driver.user.name,
+                "phone": trip.driver.user.phone,
+                "vehicle_no": trip.vehicle.reg_no if trip.vehicle else None,
             }
-        if trip.vehicle:
+        ping = (db.query(LocationPing).filter_by(trip_id=trip.id, driver_id=trip.driver_id)
+                .order_by(LocationPing.ts.desc()).first())
+        if ping and ping.location and {"lat", "lng"} <= ping.location.keys():
             vehicle_info = {
-                "reg_no": trip.vehicle.reg_no,
-                "lat": 12.9131,
-                "lng": 77.6101,
-                "heading": 90
+                "lat": ping.location["lat"],
+                "lng": ping.location["lng"],
+                "heading": ping.heading,
+                "speed_kmh": ping.speed_kmh,
+                "updated_at": ping.ts,
             }
-        eta_mins = 15
+        if stop.eta and order.status == OrderStatus.OUT_FOR_DELIVERY:
+            eta = stop.eta if stop.eta.tzinfo else stop.eta.replace(tzinfo=timezone.utc)
+            remaining = (eta - utc_now()).total_seconds()
+            eta_mins = ceil(remaining / 60) if remaining >= 0 else None
 
     return OrderTrackingResponse(
         order_id=order.id,
         status=order.status,
+        trip_id=stop.trip_id if stop else None,
         driver=driver_info,
         vehicle=vehicle_info,
+        destination=stop.location if stop and stop.location and {"lat", "lng"} <= stop.location.keys() else None,
         eta_minutes=eta_mins
     )
 
